@@ -548,6 +548,10 @@ extents_alloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	return extent;
 }
 
+/* extent»ØÊÕ
+ * @param tsdn tsd¾ä±ú
+ * @param arena
+ */
 void
 extents_dalloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
     extents_t *extents, extent_t *extent) {

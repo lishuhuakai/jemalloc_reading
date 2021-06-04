@@ -2,55 +2,65 @@
 #define JEMALLOC_INTERNAL_QR_H
 
 /* Ring definitions. */
-#define qr(a_type)							\
+#define qr(a_type)						\
 struct {								\
-	a_type	*qre_next;						\
-	a_type	*qre_prev;						\
+	a_type	*qre_next;					\
+	a_type	*qre_prev;					\
 }
 
+/* 一般都这样来使用:
+ * struct a {
+ *   qr(struct b) link;
+ * }
+ */
 /* Ring functions. */
+/* 初始化函数 */
 #define qr_new(a_qr, a_field) do {					\
 	(a_qr)->a_field.qre_next = (a_qr);				\
 	(a_qr)->a_field.qre_prev = (a_qr);				\
 } while (0)
 
+/* 获取下一个值 */
 #define qr_next(a_qr, a_field) ((a_qr)->a_field.qre_next)
-
+/* 获取一个值 */
 #define qr_prev(a_qr, a_field) ((a_qr)->a_field.qre_prev)
 
+/* 将a_qr插入到a_qrelm之前 */
 #define qr_before_insert(a_qrelm, a_qr, a_field) do {			\
 	(a_qr)->a_field.qre_prev = (a_qrelm)->a_field.qre_prev;		\
-	(a_qr)->a_field.qre_next = (a_qrelm);				\
+	(a_qr)->a_field.qre_next = (a_qrelm);				        \
 	(a_qr)->a_field.qre_prev->a_field.qre_next = (a_qr);		\
-	(a_qrelm)->a_field.qre_prev = (a_qr);				\
+	(a_qrelm)->a_field.qre_prev = (a_qr);				        \
 } while (0)
 
+/* 将a_qr插入到a_qrelm之后 */
 #define qr_after_insert(a_qrelm, a_qr, a_field) do {			\
 	(a_qr)->a_field.qre_next = (a_qrelm)->a_field.qre_next;		\
-	(a_qr)->a_field.qre_prev = (a_qrelm);				\
+	(a_qr)->a_field.qre_prev = (a_qrelm);				        \
 	(a_qr)->a_field.qre_next->a_field.qre_prev = (a_qr);		\
-	(a_qrelm)->a_field.qre_next = (a_qr);				\
+	(a_qrelm)->a_field.qre_next = (a_qr);				        \
 } while (0)
 
 #define qr_meld(a_qr_a, a_qr_b, a_type, a_field) do {			\
-	a_type *t;							\
+	a_type *t;							                        \
 	(a_qr_a)->a_field.qre_prev->a_field.qre_next = (a_qr_b);	\
 	(a_qr_b)->a_field.qre_prev->a_field.qre_next = (a_qr_a);	\
-	t = (a_qr_a)->a_field.qre_prev;					\
+	t = (a_qr_a)->a_field.qre_prev;					            \
 	(a_qr_a)->a_field.qre_prev = (a_qr_b)->a_field.qre_prev;	\
-	(a_qr_b)->a_field.qre_prev = t;					\
+	(a_qr_b)->a_field.qre_prev = t;					            \
 } while (0)
 
 /*
  * qr_meld() and qr_split() are functionally equivalent, so there's no need to
  * have two copies of the code.
  */
+ /* 切分 */
 #define qr_split(a_qr_a, a_qr_b, a_type, a_field)			\
 	qr_meld((a_qr_a), (a_qr_b), a_type, a_field)
 
 #define qr_remove(a_qr, a_field) do {					\
 	(a_qr)->a_field.qre_prev->a_field.qre_next			\
-	    = (a_qr)->a_field.qre_next;					\
+	    = (a_qr)->a_field.qre_next;					    \
 	(a_qr)->a_field.qre_next->a_field.qre_prev			\
 	    = (a_qr)->a_field.qre_prev;					\
 	(a_qr)->a_field.qre_next = (a_qr);				\

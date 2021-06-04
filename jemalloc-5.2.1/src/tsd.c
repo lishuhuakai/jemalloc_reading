@@ -315,11 +315,13 @@ tsd_fetch_slow(tsd_t *tsd, bool minimal) {
 	return tsd;
 }
 
+/* ÄÚ´æÉêÇë */
 void *
 malloc_tsd_malloc(size_t size) {
 	return a0malloc(CACHELINE_CEILING(size));
 }
 
+/* ÄÚ´æÊÍ·Å */
 void
 malloc_tsd_dalloc(void *wrapper) {
 	a0dalloc(wrapper);

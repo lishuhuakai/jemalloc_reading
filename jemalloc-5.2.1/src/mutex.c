@@ -131,6 +131,11 @@ mutex_addr_comp(const witness_t *witness1, void *mutex1,
 	}
 }
 
+/* 初始化互斥锁
+ * @param mutex 互斥锁句柄
+ * @param name 互斥锁的名称
+ * @param
+ */
 bool
 malloc_mutex_init(malloc_mutex_t *mutex, const char *name,
     witness_rank_t rank, malloc_mutex_lock_order_t lock_order) {

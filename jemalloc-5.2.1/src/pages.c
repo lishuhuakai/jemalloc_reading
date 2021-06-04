@@ -412,7 +412,7 @@ pages_dodump(void *addr, size_t size) {
 #endif
 }
 
-
+/* 获取页的大小,linux下一般是4k */
 static size_t
 os_page_detect(void) {
 #ifdef _WIN32
@@ -559,12 +559,12 @@ init_thp_state(void) {
 	static const char sys_state_always[] = "[always] madvise never\n";
 	static const char sys_state_never[] = "always madvise [never]\n";
 	char buf[sizeof(sys_state_madvise)];
-
+    /* 透明大页 */
 #if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_open)
 	int fd = (int)syscall(SYS_open,
 	    "/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY);
 #else
-	int fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY);
+	int fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY); /* 打开文件 */
 #endif
 	if (fd == -1) {
 		goto label_error;
@@ -578,7 +578,7 @@ init_thp_state(void) {
 #endif
 
         if (nread < 0) {
-		goto label_error; 
+		goto label_error;
         }
 
 	if (strncmp(buf, sys_state_madvise, (size_t)nread) == 0) {

@@ -38,6 +38,11 @@ tcache_event(tsd_t *tsd, tcache_t *tcache) {
 	}
 }
 
+/* 在tcache中分配内存
+ * @param zero 是否要将内存块清零
+ * @param size 内存块大小
+ * @param binind 内存级别,在一个区间内的内存块大小都属于同一个级别
+ */
 JEMALLOC_ALWAYS_INLINE void *
 tcache_alloc_small(tsd_t *tsd, arena_t *arena, tcache_t *tcache,
     size_t size, szind_t binind, bool zero, bool slow_path) {
@@ -47,7 +52,7 @@ tcache_alloc_small(tsd_t *tsd, arena_t *arena, tcache_t *tcache,
 	size_t usize JEMALLOC_CC_SILENCE_INIT(0);
 
 	assert(binind < SC_NBINS);
-	bin = tcache_small_bin_get(tcache, binind);
+	bin = tcache_small_bin_get(tcache, binind); /* 获取bin */
 	ret = cache_bin_alloc_easy(bin, &tcache_success);
 	assert(tcache_success == (ret != NULL));
 	if (unlikely(!tcache_success)) {

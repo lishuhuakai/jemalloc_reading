@@ -74,6 +74,7 @@ struct arena_decay_s {
 	uint64_t		ceil_npages;
 };
 
+/* 用于分配和回收extent的结构,每个用户线程会被绑定到一个arena上 */
 struct arena_s {
 	/*
 	 * Number of threads currently assigned to this arena.  Each thread has
@@ -101,7 +102,7 @@ struct arena_s {
 	tsdn_t		*last_thd;
 
 	/* Synchronization: internal. */
-	arena_stats_t		stats;
+	arena_stats_t		stats; /* 统计信息 */
 
 	/*
 	 * Lists of tcaches and cache_bin_array_descriptors for extant threads
@@ -112,7 +113,7 @@ struct arena_s {
 	 */
 	ql_head(tcache_t)			tcache_ql;
 	ql_head(cache_bin_array_descriptor_t)	cache_bin_array_descriptor_ql;
-	malloc_mutex_t				tcache_ql_mtx;
+	malloc_mutex_t				tcache_ql_mtx;  /* 互斥锁 */
 
 	/* Synchronization: internal. */
 	prof_accum_t		prof_accum;
@@ -161,8 +162,8 @@ struct arena_s {
 	 *
 	 * Synchronization: internal.
 	 */
-	extents_t		extents_dirty;
-	extents_t		extents_muzzy;
+	extents_t		extents_dirty; /* 刚被释放后空闲extent位于的地方 */
+	extents_t		extents_muzzy; /* extents_dirty进行lazy purge后位于的地方 */
 	extents_t		extents_retained;
 
 	/*
@@ -213,7 +214,7 @@ struct arena_s {
 	 *
 	 * Synchronization: internal.
 	 */
-	base_t			*base;
+	base_t			*base; /* 用于分配元数据的base */
 	/* Used to determine uptime.  Read-only after initialization. */
 	nstime_t		create_time;
 };

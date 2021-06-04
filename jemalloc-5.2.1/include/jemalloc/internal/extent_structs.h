@@ -35,17 +35,18 @@ struct extent_s {
 	 * nnnnnnnn ... nnnnnnss ssssffff ffffffii iiiiiitt zdcbaaaa aaaaaaaa
 	 *
 	 * arena_ind: Arena from which this extent came, or all 1 bits if
-	 *            unassociated.
+	 *            unassociated. 这个extent属于哪一个arena
 	 *
 	 * slab: The slab flag indicates whether the extent is used for a slab
 	 *       of small regions.  This helps differentiate small size classes,
 	 *       and it indicates whether interior pointers can be looked up via
-	 *       iealloc().
+	 *       iealloc(). slab falg用于标记extent是否被用做小区域的slab
 	 *
 	 * committed: The committed flag indicates whether physical memory is
 	 *            committed to the extent, whether explicitly or implicitly
 	 *            as on a system that overcommits and satisfies physical
 	 *            memory needs on demand via soft page faults.
+	 *            committed标记标识,物理内存是否提交到了extent
 	 *
 	 * dumpable: The dumpable flag indicates whether or not we've set the
 	 *           memory in question to be dumpable.  Note that this
@@ -92,7 +93,7 @@ struct extent_s {
 	uint64_t		e_bits;
 #define MASK(CURRENT_FIELD_WIDTH, CURRENT_FIELD_SHIFT) ((((((uint64_t)0x1U) << (CURRENT_FIELD_WIDTH)) - 1)) << (CURRENT_FIELD_SHIFT))
 
-#define EXTENT_BITS_ARENA_WIDTH  MALLOCX_ARENA_BITS
+#define EXTENT_BITS_ARENA_WIDTH  MALLOCX_ARENA_BITS /* 12bit */
 #define EXTENT_BITS_ARENA_SHIFT  0
 #define EXTENT_BITS_ARENA_MASK  MASK(EXTENT_BITS_ARENA_WIDTH, EXTENT_BITS_ARENA_SHIFT)
 
@@ -170,7 +171,7 @@ struct extent_s {
 
 	union {
 		/* Small region slab metadata. */
-		arena_slab_data_t	e_slab_data;
+		arena_slab_data_t	e_slab_data; /* 元数据   */
 
 		/* Profiling data, used for large objects. */
 		struct {
@@ -186,6 +187,7 @@ typedef ph(extent_t) extent_tree_t;
 typedef ph(extent_t) extent_heap_t;
 
 /* Quantized collection of extents, with built-in LRU queue. */
+/* 一系列extent的集合 */
 struct extents_s {
 	malloc_mutex_t		mtx;
 

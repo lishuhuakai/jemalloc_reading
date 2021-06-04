@@ -18,14 +18,15 @@ typedef enum {
 	background_thread_paused,
 } background_thread_state_t;
 
+/* 记录后台线程的相关信息 */
 struct background_thread_info_s {
 #ifdef JEMALLOC_BACKGROUND_THREAD
 	/* Background thread is pthread specific. */
 	pthread_t		thread;
 	pthread_cond_t		cond;
 #endif
-	malloc_mutex_t		mtx;
-	background_thread_state_t	state;
+	malloc_mutex_t		mtx;  /* 互斥锁 */
+	background_thread_state_t	state; /* 状态 */
 	/* When true, it means no wakeup scheduled. */
 	atomic_b_t		indefinite_sleep;
 	/* Next scheduled wakeup time (absolute time in ns). */

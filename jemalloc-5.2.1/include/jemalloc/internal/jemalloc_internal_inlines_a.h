@@ -81,6 +81,10 @@ arena_tdata_get(tsd_t *tsd, unsigned ind, bool refresh_if_missing) {
 	return arena_tdata_get_hard(tsd, ind);
 }
 
+/* 获取arena
+ * @param tsdn tsd句柄
+ * @param init_if_missing 如果没找到,就初始化
+ */
 static inline arena_t *
 arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing) {
 	arena_t *ret;

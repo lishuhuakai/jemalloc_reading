@@ -218,6 +218,9 @@ malloc_init_a0(void) {
 	return false;
 }
 
+/* jemalloc模块的初始化
+ *
+ */
 JEMALLOC_ALWAYS_INLINE bool
 malloc_init(void) {
 	if (unlikely(!malloc_initialized()) && malloc_init_hard()) {
@@ -231,6 +234,9 @@ malloc_init(void) {
  * cannot tolerate TLS variable access.
  */
 
+/*
+ * @param zero �Ƿ�Ҫ����
+ */
 static void *
 a0ialloc(size_t size, bool zero, bool is_internal) {
 	if (unlikely(malloc_init_a0())) {
@@ -360,6 +366,9 @@ arena_new_create_background_thread(tsdn_t *tsdn, unsigned ind) {
 	}
 }
 
+/* arena的初始化.
+ *
+ */
 arena_t *
 arena_init(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 	arena_t *arena;
@@ -659,7 +668,7 @@ stats_print_atexit(void) {
 		 * continue to allocate.
 		 */
 		for (i = 0, narenas = narenas_total_get(); i < narenas; i++) {
-			arena_t *arena = arena_get(tsdn, i, false);
+			arena_t *arena = arena_get(tsdn, i, false); /* 获取每一个arena */
 			if (arena != NULL) {
 				tcache_t *tcache;
 
@@ -1463,6 +1472,7 @@ malloc_init_hard_needed(void) {
 #ifdef JEMALLOC_THREADED_INIT
 	if (malloc_initializer != NO_INITIALIZER && !IS_INITIALIZER) {
 		/* Busy-wait until the initializing thread completes. */
+        /* 忙等�?直到初始化线程完�?*/
 		spin_t spinner = SPIN_INITIALIZER;
 		do {
 			malloc_mutex_unlock(TSDN_NULL, &init_lock);
@@ -1508,7 +1518,7 @@ malloc_init_hard_a0_locked() {
 
 	if (opt_stats_print) {
 		/* Print statistics at exit. */
-		if (atexit(stats_print_atexit) != 0) {
+		if (atexit(stats_print_atexit) != 0) { /* 在退出的时候执行stats_print_atexit */
 			malloc_write("<jemalloc>: Error in atexit()\n");
 			if (opt_abort) {
 				abort();

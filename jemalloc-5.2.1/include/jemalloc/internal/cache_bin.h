@@ -19,7 +19,7 @@
  * so that negative numbers can encode "invalid" states (e.g. a low water mark
  * of -1 for a cache that has been depleted).
  */
-typedef int32_t cache_bin_sz_t;
+typedef int32_t cache_bin_sz_t; /* bin的大小 */
 
 typedef struct cache_bin_stats_s cache_bin_stats_t;
 struct cache_bin_stats_s {
@@ -27,7 +27,7 @@ struct cache_bin_stats_s {
 	 * Number of allocation requests that corresponded to the size of this
 	 * bin.
 	 */
-	uint64_t nrequests;
+	uint64_t nrequests; /* 分配请求的个数 */
 };
 
 /*
@@ -37,15 +37,15 @@ struct cache_bin_stats_s {
 typedef struct cache_bin_info_s cache_bin_info_t;
 struct cache_bin_info_s {
 	/* Upper limit on ncached. */
-	cache_bin_sz_t ncached_max;
+	cache_bin_sz_t ncached_max; /* 上限 */
 };
 
 typedef struct cache_bin_s cache_bin_t;
 struct cache_bin_s {
 	/* Min # cached since last GC. */
-	cache_bin_sz_t low_water;
+	cache_bin_sz_t low_water; /* 低水位 */
 	/* # of cached objects. */
-	cache_bin_sz_t ncached;
+	cache_bin_sz_t ncached; /* 已经缓存的object的数目 */
 	/*
 	 * ncached and stats are both modified frequently.  Let's keep them
 	 * close so that they have a higher chance of being on the same
@@ -70,12 +70,13 @@ struct cache_bin_array_descriptor_s {
 	 * The arena keeps a list of the cache bins associated with it, for
 	 * stats collection.
 	 */
-	ql_elm(cache_bin_array_descriptor_t) link;
+	ql_elm(cache_bin_array_descriptor_t) link; /* 链表  */
 	/* Pointers to the tcache bins. */
 	cache_bin_t *bins_small;
 	cache_bin_t *bins_large;
 };
 
+/* cache_bin_array_descriptor的初始化 */
 static inline void
 cache_bin_array_descriptor_init(cache_bin_array_descriptor_t *descriptor,
     cache_bin_t *bins_small, cache_bin_t *bins_large) {
@@ -84,6 +85,11 @@ cache_bin_array_descriptor_init(cache_bin_array_descriptor_t *descriptor,
 	descriptor->bins_large = bins_large;
 }
 
+/* 从bin中获取一个内存块
+ * @param success 是否获取成功
+ * @param bin
+ * @return 返回指针
+ */
 JEMALLOC_ALWAYS_INLINE void *
 cache_bin_alloc_easy(cache_bin_t *bin, bool *success) {
 	void *ret;
@@ -116,6 +122,9 @@ cache_bin_alloc_easy(cache_bin_t *bin, bool *success) {
 	return ret;
 }
 
+/* 将ptr缓存到bin中
+ * @param bin_info 配置信息
+ */
 JEMALLOC_ALWAYS_INLINE bool
 cache_bin_dalloc_easy(cache_bin_t *bin, cache_bin_info_t *bin_info, void *ptr) {
 	if (unlikely(bin->ncached == bin_info->ncached_max)) {

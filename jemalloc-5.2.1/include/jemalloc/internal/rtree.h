@@ -77,6 +77,7 @@ struct rtree_level_s {
 };
 
 typedef struct rtree_s rtree_t;
+/* Radix Tree 基数树 */
 struct rtree_s {
 	malloc_mutex_t		init_lock;
 	/* Number of elements based on rtree_levels[0].bits. */

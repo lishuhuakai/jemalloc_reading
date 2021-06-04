@@ -48,6 +48,8 @@
  * (never touched unless config_debug) at the end of tcache, so we place them
  * there to avoid breaking the cachelines and possibly paging in an extra page.
  */
+
+/* tsd -- thread specific data 每个线程独有,用于存放与这个线程相关的结构 */
 #ifdef JEMALLOC_JET
 typedef void (*test_callback_t)(int *);
 #  define MALLOC_TSD_TEST_DATA_INIT 0x72b65c10
@@ -200,6 +202,7 @@ MALLOC_TSD
 #undef O
 };
 
+/* 获取状态信息 */
 JEMALLOC_ALWAYS_INLINE uint8_t
 tsd_state_get(tsd_t *tsd) {
 	/*
@@ -230,6 +233,7 @@ tsdn_null(const tsdn_t *tsdn) {
 	return tsdn == NULL;
 }
 
+/* 获取线程私有数据 */
 JEMALLOC_ALWAYS_INLINE tsd_t *
 tsdn_tsd(tsdn_t *tsdn) {
 	assert(!tsdn_null(tsdn));

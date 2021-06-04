@@ -160,6 +160,8 @@ sz_size2index_lookup(size_t size) {
 	return ret;
 }
 
+/* 根据size算出一个index
+ */
 JEMALLOC_ALWAYS_INLINE szind_t
 sz_size2index(size_t size) {
 	if (likely(size <= SC_LOOKUP_MAXCLASS)) {

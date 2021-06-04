@@ -43,7 +43,7 @@ struct malloc_mutex_s {
 #else
 			pthread_mutex_t		lock;
 #endif
-			/* 
+			/*
 			 * Hint flag to avoid exclusive cache line contention
 			 * during spin waiting
 			 */
@@ -213,6 +213,9 @@ malloc_mutex_prof_merge(mutex_prof_data_t *sum, mutex_prof_data_t *data) {
 	sum->n_lock_ops += data->n_lock_ops;
 }
 
+/* 构建mutex,加锁
+ *
+ */
 static inline void
 malloc_mutex_lock(tsdn_t *tsdn, malloc_mutex_t *mutex) {
 	witness_assert_not_owner(tsdn_witness_tsdp_get(tsdn), &mutex->witness);
@@ -226,6 +229,9 @@ malloc_mutex_lock(tsdn_t *tsdn, malloc_mutex_t *mutex) {
 	witness_lock(tsdn_witness_tsdp_get(tsdn), &mutex->witness);
 }
 
+/* mutex解锁
+ *
+ */
 static inline void
 malloc_mutex_unlock(tsdn_t *tsdn, malloc_mutex_t *mutex) {
 	atomic_store_b(&mutex->locked, false, ATOMIC_RELAXED);

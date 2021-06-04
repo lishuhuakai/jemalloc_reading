@@ -38,6 +38,11 @@ isalloc(tsdn_t *tsdn, const void *ptr) {
 	return arena_salloc(tsdn, ptr);
 }
 
+/* 内存分配
+ * @param tsdn tsd句柄
+ * @param size 要分配的内存大小
+ * @param ind index值
+ */
 JEMALLOC_ALWAYS_INLINE void *
 iallocztm(tsdn_t *tsdn, size_t size, szind_t ind, bool zero, tcache_t *tcache,
     bool is_internal, arena_t *arena, bool slow_path) {

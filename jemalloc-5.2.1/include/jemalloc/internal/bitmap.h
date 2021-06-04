@@ -149,6 +149,7 @@ typedef struct bitmap_level_s {
 	size_t group_offset;
 } bitmap_level_t;
 
+/* 位图信息 */
 typedef struct bitmap_info_s {
 	/* Logical number of bits in bitmap (stored at bottom level). */
 	size_t nbits;

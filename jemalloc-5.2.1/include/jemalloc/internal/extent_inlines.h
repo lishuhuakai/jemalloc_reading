@@ -115,6 +115,9 @@ extent_slab_get(const extent_t *extent) {
 	    EXTENT_BITS_SLAB_SHIFT);
 }
 
+/* 获取extent中free region的个数
+ *
+ */
 static inline unsigned
 extent_nfree_get(const extent_t *extent) {
 	assert(extent_slab_get(extent));
@@ -285,6 +288,7 @@ extent_nfree_inc(extent_t *extent) {
 	extent->e_bits += ((uint64_t)1U << EXTENT_BITS_NFREE_SHIFT);
 }
 
+/* 将空闲的region个数减掉1 */
 static inline void
 extent_nfree_dec(extent_t *extent) {
 	assert(extent_slab_get(extent));

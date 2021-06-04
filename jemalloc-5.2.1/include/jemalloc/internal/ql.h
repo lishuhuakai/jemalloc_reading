@@ -3,12 +3,14 @@
 
 #include "jemalloc/internal/qr.h"
 
+/* 链表的实现 */
 /* List definitions. */
-#define ql_head(a_type)							\
+#define ql_head(a_type)					\
 struct {								\
-	a_type *qlh_first;						\
+	a_type *qlh_first;					\
 }
 
+/* 链表头部的初始化 */
 #define ql_head_initializer(a_head) {NULL}
 
 #define ql_elm(a_type)	qr(a_type)
@@ -18,10 +20,12 @@ struct {								\
 	(a_head)->qlh_first = NULL;					\
 } while (0)
 
+/* 初始化一个新元素 */
 #define ql_elm_new(a_elm, a_field) qr_new((a_elm), a_field)
 
+/* 获取链表的第一个元素 */
 #define ql_first(a_head) ((a_head)->qlh_first)
-
+/* 获取链表的最后一个元素 */
 #define ql_last(a_head, a_field)					\
 	((ql_first(a_head) != NULL)					\
 	    ? qr_prev(ql_first(a_head), a_field) : NULL)

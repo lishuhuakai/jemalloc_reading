@@ -29,7 +29,7 @@ const char *percpu_arena_mode_names[] = {
 };
 percpu_arena_mode_t opt_percpu_arena = PERCPU_ARENA_DEFAULT;
 
-ssize_t opt_dirty_decay_ms = DIRTY_DECAY_MS_DEFAULT;
+ssize_t opt_dirty_decay_ms = DIRTY_DECAY_MS_DEFAULT; /*  */
 ssize_t opt_muzzy_decay_ms = MUZZY_DECAY_MS_DEFAULT;
 
 static atomic_zd_t dirty_decay_ms_default;
@@ -252,6 +252,9 @@ arena_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
 	}
 }
 
+/* arena内存释放
+ *
+ */
 void
 arena_extents_dirty_dalloc(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent) {
@@ -267,22 +270,29 @@ arena_extents_dirty_dalloc(tsdn_t *tsdn, arena_t *arena,
 	}
 }
 
+/* 在slab中进行内存的分配
+ * @param bin_info bin的描述信息
+ */
 static void *
 arena_slab_reg_alloc(extent_t *slab, const bin_info_t *bin_info) {
 	void *ret;
 	arena_slab_data_t *slab_data = extent_slab_data_get(slab);
 	size_t regind;
 
-	assert(extent_nfree_get(slab) > 0);
+	assert(extent_nfree_get(slab) > 0); /* 空闲region的个数 */
 	assert(!bitmap_full(slab_data->bitmap, &bin_info->bitmap_info));
 
 	regind = bitmap_sfu(slab_data->bitmap, &bin_info->bitmap_info);
+    /* 获取regind指示的内存 */
 	ret = (void *)((uintptr_t)extent_addr_get(slab) +
 	    (uintptr_t)(bin_info->reg_size * regind));
 	extent_nfree_dec(slab);
 	return ret;
 }
-
+/* 在slab中批量分配内存
+ * @param cnt 内存块个数
+ * @param ptrs 数组,用于存储分配的内存
+ */
 static void
 arena_slab_reg_alloc_batch(extent_t *slab, const bin_info_t *bin_info,
 			   unsigned cnt, void** ptrs) {
@@ -1456,6 +1466,9 @@ arena_dalloc_junk_small_impl(void *ptr, const bin_info_t *bin_info) {
 arena_dalloc_junk_small_t *JET_MUTABLE arena_dalloc_junk_small =
     arena_dalloc_junk_small_impl;
 
+/* 小内存的分配
+ * @param binindx index值
+ */
 static void *
 arena_malloc_small(tsdn_t *tsdn, arena_t *arena, szind_t binind, bool zero) {
 	void *ret;
@@ -1466,7 +1479,7 @@ arena_malloc_small(tsdn_t *tsdn, arena_t *arena, szind_t binind, bool zero) {
 	assert(binind < SC_NBINS);
 	usize = sz_index2size(binind);
 	unsigned binshard;
-	bin = arena_bin_choose_lock(tsdn, arena, binind, &binshard);
+	bin = arena_bin_choose_lock(tsdn, arena, binind, &binshard); /* 获取一个bin */
 
 	if ((slab = bin->slabcur) != NULL && extent_nfree_get(slab) > 0) {
 		ret = arena_slab_reg_alloc(slab, &bin_infos[binind]);
@@ -1510,6 +1523,7 @@ arena_malloc_small(tsdn_t *tsdn, arena_t *arena, szind_t binind, bool zero) {
 	return ret;
 }
 
+/* 在arena中进行内存分配 */
 void *
 arena_malloc_hard(tsdn_t *tsdn, arena_t *arena, size_t size, szind_t ind,
     bool zero) {

@@ -155,6 +155,10 @@ arena_decay_extent(tsdn_t *tsdn,arena_t *arena, extent_hooks_t **r_extent_hooks,
 	}
 }
 
+/* 从arena中分配内存
+ * @param tcache 线程内存缓存池指针,主要为了避免加锁
+ * @param size 内存块大小
+ */
 JEMALLOC_ALWAYS_INLINE void *
 arena_malloc(tsdn_t *tsdn, arena_t *arena, size_t size, szind_t ind, bool zero,
     tcache_t *tcache, bool slow_path) {

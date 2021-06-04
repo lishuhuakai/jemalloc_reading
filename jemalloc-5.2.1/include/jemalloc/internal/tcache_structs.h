@@ -9,7 +9,8 @@
 
 /* Various uses of this struct need it to be a named type. */
 typedef ql_elm(tsd_t) tsd_link_t;
-
+/* thread cache,每个线程独有的缓存,大多数内存申请都可以在tcache中直接得到,从而避免加锁
+ */
 struct tcache_s {
 	/*
 	 * To minimize our cache-footprint, we put the frequently accessed data
@@ -25,7 +26,7 @@ struct tcache_s {
 	 * During tcache initialization, the avail pointer in each element of
 	 * tbins is initialized to point to the proper offset within this array.
 	 */
-	cache_bin_t	bins_small[SC_NBINS];
+	cache_bin_t	bins_small[SC_NBINS]; /* 小内存的cache_bin */
 
 	/*
 	 * This data is less hot; we can be a little less careful with our
@@ -46,7 +47,7 @@ struct tcache_s {
 	cache_bin_array_descriptor_t cache_bin_array_descriptor;
 
 	/* The arena this tcache is associated with. */
-	arena_t		*arena;
+	arena_t		*arena; /* tcache关联的arena */
 	/* Next bin to GC. */
 	szind_t		next_gc_bin;
 	/* For small bins, fill (ncached_max >> lg_fill_div). */

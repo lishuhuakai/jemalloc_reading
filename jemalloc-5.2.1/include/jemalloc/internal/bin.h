@@ -13,6 +13,8 @@
  * allocations.
  */
 
+/* bin(容器)中包含很多extents,它们被slab分配器使用 */
+
 /*
  * Read-only information associated with each element of arena_t's bins array
  * is stored separately, partly to reduce memory usage (only one copy, rather
@@ -33,6 +35,7 @@
  *   \--------------------/
  */
 typedef struct bin_info_s bin_info_t;
+/* bin描述信息 */
 struct bin_info_s {
 	/* Size of regions in a slab for this bin's size class. */
 	size_t			reg_size;
@@ -56,6 +59,7 @@ struct bin_info_s {
 extern bin_info_t bin_infos[SC_NBINS];
 
 typedef struct bin_s bin_t;
+
 struct bin_s {
 	/* All operations on bin_t fields require lock ownership. */
 	malloc_mutex_t		lock;
@@ -73,13 +77,13 @@ struct bin_s {
 	 * allocations come from the non-full slab that is oldest/lowest in
 	 * memory.
 	 */
-	extent_heap_t		slabs_nonfull;
+	extent_heap_t		slabs_nonfull;  /* 非满slab */
 
 	/* List used to track full slabs. */
-	extent_list_t		slabs_full;
+	extent_list_t		slabs_full; /* 满slab */
 
 	/* Bin statistics. */
-	bin_stats_t	stats;
+	bin_stats_t	stats;  /* 统计信息 */
 };
 
 /* A set of sharded bins of the same size class. */
@@ -103,6 +107,7 @@ void bin_postfork_parent(tsdn_t *tsdn, bin_t *bin);
 void bin_postfork_child(tsdn_t *tsdn, bin_t *bin);
 
 /* Stats. */
+/* 统计信息合并 */
 static inline void
 bin_stats_merge(tsdn_t *tsdn, bin_stats_t *dst_bin_stats, bin_t *bin) {
 	malloc_mutex_lock(tsdn, &bin->lock);

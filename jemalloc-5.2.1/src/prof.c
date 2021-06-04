@@ -30,14 +30,14 @@
 /******************************************************************************/
 /* Data. */
 
-bool		opt_prof = false;
+bool		opt_prof = false;           /* 是否开启检测功能 */
 bool		opt_prof_active = true;
 bool		opt_prof_thread_active_init = true;
 size_t		opt_lg_prof_sample = LG_PROF_SAMPLE_DEFAULT;
 ssize_t		opt_lg_prof_interval = LG_PROF_INTERVAL_DEFAULT;
 bool		opt_prof_gdump = false;
 bool		opt_prof_final = false;
-bool		opt_prof_leak = false;
+bool		opt_prof_leak = false;  /* 是否检测泄漏 */
 bool		opt_prof_accum = false;
 bool		opt_prof_log = false;
 char		opt_prof_prefix[
@@ -2921,9 +2921,10 @@ prof_boot0(void) {
 	cassert(config_prof);
 
 	memcpy(opt_prof_prefix, PROF_PREFIX_DEFAULT,
-	    sizeof(PROF_PREFIX_DEFAULT));
+	    sizeof(PROF_PREFIX_DEFAULT)); /* jeprof */
 }
 
+/* prof模块的初始化 */
 void
 prof_boot1(void) {
 	cassert(config_prof);

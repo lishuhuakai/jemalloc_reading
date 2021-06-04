@@ -91,6 +91,9 @@ tsd_wrapper_get(bool init) {
 
 JEMALLOC_ALWAYS_INLINE bool
 tsd_boot0(void) {
+    /* 创建线程的私有数据
+     * tsd_cleanup_wrapper为释放函数
+     */
 	if (pthread_key_create(&tsd_tsd, tsd_cleanup_wrapper) != 0) {
 		return true;
 	}

@@ -589,6 +589,7 @@ background_thread_create_locked(tsd_t *tsd, unsigned arena_ind) {
 }
 
 /* Create a new background thread if needed. */
+/* 构建后台线程 */
 bool
 background_thread_create(tsd_t *tsd, unsigned arena_ind) {
 	assert(have_background_thread);
