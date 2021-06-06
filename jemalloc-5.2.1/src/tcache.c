@@ -85,6 +85,9 @@ tcache_event_hard(tsd_t *tsd, tcache_t *tcache) {
 	}
 }
 
+/* 内存分配
+ *
+ */
 void *
 tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
     cache_bin_t *tbin, szind_t binind, bool *tcache_success) {
@@ -337,6 +340,9 @@ tcache_bin_flush_large(tsd_t *tsd, cache_bin_t *tbin, szind_t binind,
 	}
 }
 
+/* 建立tcache与arena的联系
+ *
+ */
 void
 tcache_arena_associate(tsdn_t *tsdn, tcache_t *tcache, arena_t *arena) {
 	assert(tcache->arena == NULL);
@@ -347,6 +353,7 @@ tcache_arena_associate(tsdn_t *tsdn, tcache_t *tcache, arena_t *arena) {
 		malloc_mutex_lock(tsdn, &arena->tcache_ql_mtx);
 
 		ql_elm_new(tcache, link);
+        /* 将tcache插入arena->tcache_ql链表之中 */
 		ql_tail_insert(&arena->tcache_ql, tcache, link);
 		cache_bin_array_descriptor_init(
 		    &tcache->cache_bin_array_descriptor, tcache->bins_small,
@@ -358,6 +365,10 @@ tcache_arena_associate(tsdn_t *tsdn, tcache_t *tcache, arena_t *arena) {
 	}
 }
 
+/* 断开tcache和tsd的联系
+ * @param tsdn
+ * @param tcache 线程内存缓存
+ */
 static void
 tcache_arena_dissociate(tsdn_t *tsdn, tcache_t *tcache) {
 	arena_t *arena = tcache->arena;

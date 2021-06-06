@@ -8,10 +8,10 @@
 /* Embedded at the beginning of every block of base-managed virtual memory. */
 struct base_block_s {
 	/* Total size of block's virtual memory mapping. */
-	size_t		size;
+	size_t		size; /* 虚拟内存映射块的大小 */
 
 	/* Next block in list of base's blocks. */
-	base_block_t	*next;
+	base_block_t	*next; /* 下一个block */
 
 	/* Tracks unused trailing space. */
 	extent_t	extent;
@@ -49,7 +49,7 @@ struct base_s {
 	extent_heap_t	avail[SC_NSIZES];
 
 	/* Stats, only maintained if config_stats. */
-	size_t		allocated;
+	size_t		allocated; /* 已经分配出去的内存大小 */
 	size_t		resident;
 	size_t		mapped;
 	/* Number of THP regions touched. */

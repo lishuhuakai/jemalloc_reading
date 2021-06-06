@@ -7,6 +7,7 @@
 #include "jemalloc/internal/mutex.h"
 #include "jemalloc/internal/sz.h"
 
+/* 关于base, 这是jemalloc内部使用的内存分配器  */
 /******************************************************************************/
 /* Data. */
 
@@ -28,6 +29,7 @@ metadata_thp_madvise(void) {
 	    (init_system_thp_mode == thp_mode_default));
 }
 
+/* 内存分配 */
 static void *
 base_map(tsdn_t *tsdn, extent_hooks_t *extent_hooks, unsigned ind, size_t size) {
 	void *addr;
@@ -115,6 +117,8 @@ label_done:
 	}
 }
 
+/* 初始化extent
+ */
 static void
 base_extent_init(size_t *extent_sn_next, extent_t *extent, void *addr,
     size_t size) {
@@ -176,6 +180,9 @@ base_auto_thp_switch(tsdn_t *tsdn, base_t *base) {
 	}
 }
 
+/* 从extent中分配内存
+ * @return 返回分配后的内存首地址
+ */
 static void *
 base_extent_bump_alloc_helper(extent_t *extent, size_t *gap_size, size_t size,
     size_t alignment) {
@@ -183,30 +190,36 @@ base_extent_bump_alloc_helper(extent_t *extent, size_t *gap_size, size_t size,
 
 	assert(alignment == ALIGNMENT_CEILING(alignment, QUANTUM));
 	assert(size == ALIGNMENT_CEILING(size, alignment));
-
+    /* 空隙大小 */
 	*gap_size = ALIGNMENT_CEILING((uintptr_t)extent_addr_get(extent),
 	    alignment) - (uintptr_t)extent_addr_get(extent);
+    /* ret是对齐后的首地址 */
 	ret = (void *)((uintptr_t)extent_addr_get(extent) + *gap_size);
 	assert(extent_bsize_get(extent) >= *gap_size + size);
+    /* 内存分配完成之后,需要更新元数据 */
 	extent_binit(extent, (void *)((uintptr_t)extent_addr_get(extent) +
 	    *gap_size + size), extent_bsize_get(extent) - *gap_size - size,
 	    extent_sn_get(extent));
 	return ret;
 }
 
+/*
+ *
+ */
 static void
 base_extent_bump_alloc_post(base_t *base, extent_t *extent, size_t gap_size,
     void *addr, size_t size) {
-	if (extent_bsize_get(extent) > 0) {
+	if (extent_bsize_get(extent) > 0) { /**/
 		/*
 		 * Compute the index for the largest size class that does not
 		 * exceed extent's size.
 		 */
 		szind_t index_floor =
 		    sz_size2index(extent_bsize_get(extent) + 1) - 1;
+        /* 将extent插入链表 */
 		extent_heap_insert(&base->avail[index_floor], extent);
 	}
-
+    /* 更新统计信息 */
 	if (config_stats) {
 		base->allocated += size;
 		/*
@@ -228,6 +241,7 @@ base_extent_bump_alloc_post(base_t *base, extent_t *extent, size_t gap_size,
 	}
 }
 
+/**/
 static void *
 base_extent_bump_alloc(base_t *base, extent_t *extent, size_t size,
     size_t alignment) {
@@ -244,13 +258,17 @@ base_extent_bump_alloc(base_t *base, extent_t *extent, size_t size,
  * base_block_t header, followed by an object of specified size and alignment.
  * On success a pointer to the initialized base_block_t header is returned.
  */
+/* 分配base_block
+ * @param size 内存块大小
+ * @param alignment 对齐
+ */
 static base_block_t *
 base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
     unsigned ind, pszind_t *pind_last, size_t *extent_sn_next, size_t size,
     size_t alignment) {
 	alignment = ALIGNMENT_CEILING(alignment, QUANTUM);
-	size_t usize = ALIGNMENT_CEILING(size, alignment);
-	size_t header_size = sizeof(base_block_t);
+	size_t usize = ALIGNMENT_CEILING(size, alignment); /* 对齐后的大小 */
+	size_t header_size = sizeof(base_block_t); /* 元数据,头部大小 */
 	size_t gap_size = ALIGNMENT_CEILING(header_size, alignment) -
 	    header_size;
 	/*
@@ -261,12 +279,14 @@ base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
 	 * alignment, whichever is larger.
 	 */
 	size_t min_block_size = HUGEPAGE_CEILING(sz_psz2u(header_size + gap_size
-	    + usize));
+	    + usize)); /* 至少要分配这么多字节 */
 	pszind_t pind_next = (*pind_last + 1 < sz_psz2ind(SC_LARGE_MAXCLASS)) ?
 	    *pind_last + 1 : *pind_last;
 	size_t next_block_size = HUGEPAGE_CEILING(sz_pind2sz(pind_next));
+    /* 计算实际要分配的内存块的大小 */
 	size_t block_size = (min_block_size > next_block_size) ? min_block_size
 	    : next_block_size;
+    /* 内存分配,注意这里的内存分配,头部已经计算在block_size中了 */
 	base_block_t *block = (base_block_t *)base_map(tsdn, extent_hooks, ind,
 	    block_size);
 	if (block == NULL) {
@@ -292,9 +312,10 @@ base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
 	}
 
 	*pind_last = sz_psz2ind(block_size);
-	block->size = block_size;
+	block->size = block_size; /* 记录下大小 */
 	block->next = NULL;
 	assert(block_size >= header_size);
+    /* 初始化block->extent */
 	base_extent_init(extent_sn_next, &block->extent,
 	    (void *)((uintptr_t)block + header_size), block_size - header_size);
 	return block;
@@ -303,6 +324,9 @@ base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
 /*
  * Allocate an extent that is at least as large as specified size, with
  * specified alignment.
+ */
+/* 分配一个extent,它至少有size大小,以及指定的对齐方式
+ *
  */
 static extent_t *
 base_extent_alloc(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment) {
@@ -321,6 +345,7 @@ base_extent_alloc(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment) {
 	if (block == NULL) {
 		return NULL;
 	}
+    /* 将block加入base->blocks链表中 */
 	block->next = base->blocks;
 	base->blocks = block;
 	if (config_stats) {
@@ -346,10 +371,14 @@ b0get(void) {
 	return b0;
 }
 
+/* 创建一个新的base结构
+ *
+ */
 base_t *
 base_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 	pszind_t pind_last = 0;
 	size_t extent_sn_next = 0;
+    /* 首先创建一个base_block结构 */
 	base_block_t *block = base_block_alloc(tsdn, NULL, extent_hooks, ind,
 	    &pind_last, &extent_sn_next, sizeof(base_t), QUANTUM);
 	if (block == NULL) {
@@ -359,6 +388,7 @@ base_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 	size_t gap_size;
 	size_t base_alignment = CACHELINE;
 	size_t base_size = ALIGNMENT_CEILING(sizeof(base_t), base_alignment);
+    /* 从base_block结构中分配一个base */
 	base_t *base = (base_t *)base_extent_bump_alloc_helper(&block->extent,
 	    &gap_size, base_size, base_alignment);
 	base->ind = ind;
@@ -386,12 +416,16 @@ base_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 		assert(base->resident <= base->mapped);
 		assert(base->n_thp << LG_HUGEPAGE <= base->mapped);
 	}
+    /* 将base_block->extent和base联系起来 */
 	base_extent_bump_alloc_post(base, &block->extent, gap_size, base,
 	    base_size);
 
 	return base;
 }
 
+/* 移除base
+ *
+ */
 void
 base_delete(tsdn_t *tsdn, base_t *base) {
 	extent_hooks_t *extent_hooks = base_extent_hooks_get(base);
@@ -399,6 +433,7 @@ base_delete(tsdn_t *tsdn, base_t *base) {
 	do {
 		base_block_t *block = next;
 		next = block->next;
+        /* 不停销毁掉base所管理的base_block */
 		base_unmap(tsdn, extent_hooks, base_ind_get(base), block,
 		    block->size);
 	} while (next != NULL);
@@ -417,15 +452,19 @@ base_extent_hooks_set(base_t *base, extent_hooks_t *extent_hooks) {
 	return old_extent_hooks;
 }
 
+/* 通过base来分配内存
+ * @param size 内存块大小
+ */
 static void *
 base_alloc_impl(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment,
     size_t *esn) {
 	alignment = QUANTUM_CEILING(alignment);
 	size_t usize = ALIGNMENT_CEILING(size, alignment);
-	size_t asize = usize + alignment - QUANTUM;
+	size_t asize = usize + alignment - QUANTUM; /* 实际大小 */
 
 	extent_t *extent = NULL;
 	malloc_mutex_lock(tsdn, &base->mtx);
+    /* best-fit */
 	for (szind_t i = sz_size2index(asize); i < SC_NSIZES; i++) {
 		extent = extent_heap_remove_first(&base->avail[i]);
 		if (extent != NULL) {
@@ -433,7 +472,7 @@ base_alloc_impl(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment,
 			break;
 		}
 	}
-	if (extent == NULL) {
+	if (extent == NULL) { /* 如果没有找到可用的extent,就需要重新分配 */
 		/* Try to allocate more space. */
 		extent = base_extent_alloc(tsdn, base, usize, alignment);
 	}

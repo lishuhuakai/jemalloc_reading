@@ -1036,6 +1036,9 @@ arena_bin_slabs_nonfull_remove(bin_t *bin, extent_t *slab) {
 	}
 }
 
+/* 尝试从bin的slabs_nonfull链表中获取一个slab
+ *
+ */
 static extent_t *
 arena_bin_slabs_nonfull_tryget(bin_t *bin) {
 	extent_t *slab = extent_heap_remove_first(&bin->slabs_nonfull);
@@ -1049,9 +1052,10 @@ arena_bin_slabs_nonfull_tryget(bin_t *bin) {
 	return slab;
 }
 
+/* 将slab插入到bin的slas_full链表之中 */
 static void
 arena_bin_slabs_full_insert(arena_t *arena, bin_t *bin, extent_t *slab) {
-	assert(extent_nfree_get(slab) == 0);
+	assert(extent_nfree_get(slab) == 0); /* 已经没有内存可供分配了 */
 	/*
 	 *  Tracking extents is required by arena_reset, which is not allowed
 	 *  for auto arenas.  Bypass this step to avoid touching the extent
@@ -1235,6 +1239,11 @@ arena_slab_alloc_hard(tsdn_t *tsdn, arena_t *arena,
 	return slab;
 }
 
+/* slab的分配
+ * @param tsdn
+ * @param arena
+ * @param binind
+ */
 static extent_t *
 arena_slab_alloc(tsdn_t *tsdn, arena_t *arena, szind_t binind, unsigned binshard,
     const bin_info_t *bin_info) {
@@ -1272,6 +1281,9 @@ arena_slab_alloc(tsdn_t *tsdn, arena_t *arena, szind_t binind, unsigned binshard
 	return slab;
 }
 
+/*
+ * @param binind 内存级别
+ */
 static extent_t *
 arena_bin_nonfull_slab_get(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
     szind_t binind, unsigned binshard) {
@@ -1284,7 +1296,7 @@ arena_bin_nonfull_slab_get(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 		return slab;
 	}
 	/* No existing slabs have any space available. */
-
+    /* 无法获取到空闲的slab */
 	bin_info = &bin_infos[binind];
 
 	/* Allocate a new slab. */
@@ -1321,11 +1333,12 @@ arena_bin_malloc_hard(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 	const bin_info_t *bin_info;
 	extent_t *slab;
 
-	bin_info = &bin_infos[binind];
+	bin_info = &bin_infos[binind]; /* 获取描述信息 */
 	if (!arena_is_auto(arena) && bin->slabcur != NULL) {
 		arena_bin_slabs_full_insert(arena, bin, bin->slabcur);
 		bin->slabcur = NULL;
 	}
+    /**/
 	slab = arena_bin_nonfull_slab_get(tsdn, arena, bin, binind, binshard);
 	if (bin->slabcur != NULL) {
 		/*
@@ -1370,7 +1383,11 @@ arena_bin_malloc_hard(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 	return arena_slab_reg_alloc(slab, bin_info);
 }
 
-/* Choose a bin shard and return the locked bin. */
+/* Choose a bin shard and return the locked bin.
+ * @param tsdn tsd句柄
+ * @param arena
+ * @param binind 内存级别
+ */
 bin_t *
 arena_bin_choose_lock(tsdn_t *tsdn, arena_t *arena, szind_t binind,
     unsigned *binshard) {
@@ -1382,18 +1399,21 @@ arena_bin_choose_lock(tsdn_t *tsdn, arena_t *arena, szind_t binind,
 	}
 	assert(*binshard < bin_infos[binind].n_shards);
 	bin = &arena->bins[binind].bin_shards[*binshard];
-	malloc_mutex_lock(tsdn, &bin->lock);
+	malloc_mutex_lock(tsdn, &bin->lock); /* 加锁 */
 
 	return bin;
 }
 
+/* 小内存分配
+ *
+ */
 void
 arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
     cache_bin_t *tbin, szind_t binind, uint64_t prof_accumbytes) {
 	unsigned i, nfill, cnt;
 
 	assert(tbin->ncached == 0);
-
+    /* 如果启用了prof的功能 */
 	if (config_prof && arena_prof_accum(tsdn, arena, prof_accumbytes)) {
 		prof_idump(tsdn);
 	}
@@ -1404,11 +1424,12 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 	for (i = 0, nfill = (tcache_bin_info[binind].ncached_max >>
 	    tcache->lg_fill_div[binind]); i < nfill; i += cnt) {
 		extent_t *slab;
-		if ((slab = bin->slabcur) != NULL && extent_nfree_get(slab) >
-		    0) {
+        /* 首先尝试从bin->slabcur中分配 */
+		if ((slab = bin->slabcur) != NULL && extent_nfree_get(slab) > 0) {
 			unsigned tofill = nfill - i;
 			cnt = tofill < extent_nfree_get(slab) ?
 				tofill : extent_nfree_get(slab);
+            /* 从slab中分配内存块到tbin->avail数组中 */
 			arena_slab_reg_alloc_batch(
 			   slab, &bin_infos[binind], cnt,
 			   tbin->avail - nfill + i);

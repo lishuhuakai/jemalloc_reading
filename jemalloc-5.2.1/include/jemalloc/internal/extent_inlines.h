@@ -125,6 +125,7 @@ extent_nfree_get(const extent_t *extent) {
 	    EXTENT_BITS_NFREE_SHIFT);
 }
 
+/* 获取首地址 */
 static inline void *
 extent_base_get(const extent_t *extent) {
 	assert(extent->e_addr == PAGE_ADDR2BASE(extent->e_addr) ||
@@ -149,6 +150,7 @@ extent_esn_get(const extent_t *extent) {
 	return (extent->e_size_esn & EXTENT_ESN_MASK);
 }
 
+/* 获取extent中可供分配的内存大小 */
 static inline size_t
 extent_bsize_get(const extent_t *extent) {
 	return extent->e_bsize;
@@ -253,6 +255,7 @@ extent_esn_set(extent_t *extent, size_t esn) {
 	    EXTENT_ESN_MASK);
 }
 
+/* 设置extent中剩余可分配的内存大小 */
 static inline void
 extent_bsize_set(extent_t *extent, size_t bsize) {
 	extent->e_bsize = bsize;
@@ -367,6 +370,11 @@ extent_is_head_set(extent_t *extent, bool is_head) {
 	    ((uint64_t)is_head << EXTENT_BITS_IS_HEAD_SHIFT);
 }
 
+/* extent的初始化
+ * @param arena extent属于哪一个arena
+ * @param addr 首地址
+ * @param size 内存块大小
+ */
 static inline void
 extent_init(extent_t *extent, arena_t *arena, void *addr, size_t size,
     bool slab, szind_t szind, size_t sn, extent_state_t state, bool zeroed,
@@ -393,6 +401,10 @@ extent_init(extent_t *extent, arena_t *arena, void *addr, size_t size,
 	}
 }
 
+/* extent的初始化
+ * @param addr 下一个可供分配的内存首地址
+ * @param bsize 剩余可用内存大小
+ */
 static inline void
 extent_binit(extent_t *extent, void *addr, size_t bsize, size_t sn) {
 	extent_arena_set(extent, NULL);
@@ -422,6 +434,7 @@ extent_list_last(const extent_list_t *list) {
 	return ql_last(list, ql_link);
 }
 
+/* 将extent插入到list之中 */
 static inline void
 extent_list_append(extent_list_t *list, extent_t *extent) {
 	ql_tail_insert(list, extent, ql_link);

@@ -24,7 +24,7 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal) {
 		ret = arena_choose_hard(tsd, internal);
 		assert(ret);
 		if (tcache_available(tsd)) {
-			tcache_t *tcache = tcache_get(tsd);
+			tcache_t *tcache = tcache_get(tsd); /* 获取tcache */
 			if (tcache->arena != NULL) {
 				/* See comments in tcache_data_init().*/
 				assert(tcache->arena ==
@@ -33,7 +33,7 @@ arena_choose_impl(tsd_t *tsd, arena_t *arena, bool internal) {
 					tcache_arena_reassociate(tsd_tsdn(tsd),
 					    tcache, ret);
 				}
-			} else {
+			} else { /* 建立好联系 */
 				tcache_arena_associate(tsd_tsdn(tsd), tcache,
 				    ret);
 			}

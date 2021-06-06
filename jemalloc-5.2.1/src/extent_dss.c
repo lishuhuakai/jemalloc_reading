@@ -34,10 +34,10 @@ static atomic_b_t	dss_extending;
 /* Atomic boolean indicating whether the DSS is exhausted. */
 static atomic_b_t	dss_exhausted;
 /* Atomic current upper limit on DSS addresses. */
-static atomic_p_t	dss_max;
+static atomic_p_t	dss_max; /* 堆栈顶部地址 */
 
 /******************************************************************************/
-
+/* 调用sbrk系统调用,调整data segment的大小 */
 static void *
 extent_dss_sbrk(intptr_t increment) {
 #ifdef JEMALLOC_DSS
@@ -94,7 +94,7 @@ extent_dss_max_update(void *new_addr) {
 	 * Get the current end of the DSS as max_cur and assure that dss_max is
 	 * up to date.
 	 */
-	void *max_cur = extent_dss_sbrk(0);
+	void *max_cur = extent_dss_sbrk(0); /* 获取堆栈顶部地址 */
 	if (max_cur == (void *)-1) {
 		return NULL;
 	}
@@ -106,6 +106,8 @@ extent_dss_max_update(void *new_addr) {
 	return max_cur;
 }
 
+/* 通过dss(sbrk)来进行内存的分配
+ */
 void *
 extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
     size_t alignment, bool *zero, bool *commit) {
@@ -127,7 +129,7 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 	if (gap == NULL) {
 		return NULL;
 	}
-
+    /* 保证没有线程在分配内存(sbark) */
 	extent_dss_extending_start();
 	if (!atomic_load_b(&dss_exhausted, ATOMIC_ACQUIRE)) {
 		/*
@@ -136,6 +138,7 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 		 * malloc.
 		 */
 		while (true) {
+            /* 获取栈顶的虚拟地址 */
 			void *max_cur = extent_dss_max_update(new_addr);
 			if (max_cur == NULL) {
 				goto label_oom;
@@ -146,13 +149,17 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 			 * necessary to satisfy alignment.  This space can be
 			 * recycled for later use.
 			 */
+			/* 页对齐的首地址 */
 			void *gap_addr_page = (void *)(PAGE_CEILING(
 			    (uintptr_t)max_cur));
+
 			void *ret = (void *)ALIGNMENT_CEILING(
 			    (uintptr_t)gap_addr_page, alignment);
+            /* 页内碎片大小 */
 			size_t gap_size_page = (uintptr_t)ret -
 			    (uintptr_t)gap_addr_page;
 			if (gap_size_page != 0) {
+                /* 这里为空闲出来的gap创建了一个extent */
 				extent_init(gap, arena, gap_addr_page,
 				    gap_size_page, false, SC_NSIZES,
 				    arena_extent_sn_next(arena),
@@ -163,6 +170,7 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 			 * Compute the address just past the end of the desired
 			 * allocation space.
 			 */
+			/* 下一个可供分配的虚拟首地址 */
 			void *dss_next = (void *)((uintptr_t)ret + size);
 			if ((uintptr_t)ret < (uintptr_t)max_cur ||
 			    (uintptr_t)dss_next < (uintptr_t)max_cur) {
@@ -178,6 +186,7 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 			    size);
 
 			/* Try to allocate. */
+            /* 尝试进行内存的分配 */
 			void *dss_prev = extent_dss_sbrk(incr);
 			if (dss_prev == max_cur) {
 				/* Success. */
@@ -186,6 +195,7 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 				extent_dss_extending_finish();
 
 				if (gap_size_page != 0) {
+                    /* 将extent放入arena */
 					extent_dalloc_gap(tsdn, arena, gap);
 				} else {
 					extent_dalloc(tsdn, arena, gap);
@@ -197,7 +207,7 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 					extent_hooks_t *extent_hooks =
 					    EXTENT_HOOKS_INITIALIZER;
 					extent_t extent;
-
+                    /* 这里的extent才是真正要分配的extent */
 					extent_init(&extent, arena, ret, size,
 					    size, false, SC_NSIZES,
 					    extent_state_active, false, true,

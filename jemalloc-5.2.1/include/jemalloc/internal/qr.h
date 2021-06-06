@@ -58,6 +58,7 @@ struct {								\
 #define qr_split(a_qr_a, a_qr_b, a_type, a_field)			\
 	qr_meld((a_qr_a), (a_qr_b), a_type, a_field)
 
+/* 将a_qr从链表中移除 */
 #define qr_remove(a_qr, a_field) do {					\
 	(a_qr)->a_field.qre_prev->a_field.qre_next			\
 	    = (a_qr)->a_field.qre_next;					    \

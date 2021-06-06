@@ -64,6 +64,7 @@ static bool extent_merge_impl(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *a, extent_t *b,
     bool growing_retained);
 
+/* 函数原型 */
 const extent_hooks_t	extent_hooks_default = {
 	extent_alloc_default,
 	extent_dalloc_default,
@@ -176,6 +177,7 @@ extent_lock_from_addr(tsdn_t *tsdn, rtree_ctx_t *rtree_ctx, void *addr,
 	return ret;
 }
 
+/* 为extent分配内存 */
 extent_t *
 extent_alloc(tsdn_t *tsdn, arena_t *arena) {
 	malloc_mutex_lock(tsdn, &arena->extent_avail_mtx);
@@ -533,6 +535,9 @@ extent_try_delayed_coalesce(tsdn_t *tsdn, arena_t *arena,
 	return false;
 }
 
+/* 分配extent
+ *
+ */
 extent_t *
 extents_alloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
     extents_t *extents, void *new_addr, size_t size, size_t pad,
@@ -1128,6 +1133,8 @@ extent_need_manual_zero(arena_t *arena) {
  * Tries to satisfy the given allocation request by reusing one of the extents
  * in the given extents_t.
  */
+/* 尝试复用extent
+ */
 static extent_t *
 extent_recycle(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
     extents_t *extents, void *new_addr, size_t size, size_t pad,
@@ -1209,6 +1216,7 @@ extent_recycle(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
  * advantage of this to avoid demanding zeroed extents, but taking advantage of
  * them if they are returned.
  */
+/* 如果调用者指定了(!*zero),仍然有可能返回清零后的内存 */
 static void *
 extent_alloc_core(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
     size_t alignment, bool *zero, bool *commit, dss_prec_t dss_prec) {
@@ -1218,6 +1226,7 @@ extent_alloc_core(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 	assert(alignment != 0);
 
 	/* "primary" dss. */
+    /* dss作为主要的分配手段 */
 	if (have_dss && dss_prec == dss_prec_primary && (ret =
 	    extent_alloc_dss(tsdn, arena, new_addr, size, alignment, zero,
 	    commit)) != NULL) {
@@ -1251,6 +1260,9 @@ extent_alloc_default_impl(tsdn_t *tsdn, arena_t *arena, void *new_addr,
 	return ret;
 }
 
+/* 分配extent
+ *
+ */
 static void *
 extent_alloc_default(extent_hooks_t *extent_hooks, void *new_addr, size_t size,
     size_t alignment, bool *zero, bool *commit, unsigned arena_ind) {

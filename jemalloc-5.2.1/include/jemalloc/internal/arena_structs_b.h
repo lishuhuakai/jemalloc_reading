@@ -21,7 +21,7 @@ struct arena_decay_s {
 	 * True if a thread is currently purging the extents associated with
 	 * this decay structure.
 	 */
-	bool			purging;
+	bool			purging; /* 是否有一个线程正在释放和本结构实例关联的extents */
 	/*
 	 * Approximate time in milliseconds from the creation of a set of unused
 	 * dirty pages until an equivalent set of unused dirty pages is purged

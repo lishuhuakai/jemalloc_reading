@@ -16,6 +16,7 @@
 #endif
 
 /******************************************************************************/
+/* 这一层直接和操作系统打交道 */
 /* Data. */
 
 /* Actual operating system page size, detected during bootstrap, <= PAGE. */
@@ -49,7 +50,10 @@ static bool pages_can_purge_lazy_runtime = true;
 static void os_pages_unmap(void *addr, size_t size);
 
 /******************************************************************************/
-
+/*
+ * @param addr 起始地址
+ * @param size 地址长度
+ */
 static void *
 os_pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
 	assert(ALIGNMENT_ADDR2BASE(addr, os_page) == addr);
@@ -175,6 +179,11 @@ pages_map_slow(size_t size, size_t alignment, bool *commit) {
 	return ret;
 }
 
+/* 分配可读可写,私有匿名映射
+ * @param addr 起始地址
+ * @param size 要分配的内存块的大小
+ * @param alignment 对齐
+ */
 void *
 pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
 	assert(alignment >= PAGE);
@@ -323,6 +332,10 @@ pages_purge_lazy(void *addr, size_t size) {
 #endif
 }
 
+/* 内存释放
+ * @param addr 起始地址
+ * @param size 内存块大小
+ */
 bool
 pages_purge_forced(void *addr, size_t size) {
 	assert(PAGE_ADDR2BASE(addr) == addr);

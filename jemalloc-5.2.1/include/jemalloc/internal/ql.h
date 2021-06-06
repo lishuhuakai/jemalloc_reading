@@ -62,6 +62,7 @@ struct {								\
 	ql_first(a_head) = qr_next((a_elm), a_field);			\
 } while (0)
 
+/* 将a_elm从a_head链表中移除 */
 #define ql_remove(a_head, a_elm, a_field) do {				\
 	if (ql_first(a_head) == (a_elm)) {				\
 		ql_first(a_head) = qr_next(ql_first(a_head), a_field);	\
