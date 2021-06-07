@@ -6,6 +6,7 @@
 #include "jemalloc/internal/extent_dss.h"
 #include "jemalloc/internal/spin.h"
 
+/* 通过dss(sbrk)来向操作系统请求内存 */
 /******************************************************************************/
 /* Data. */
 
@@ -28,11 +29,11 @@ static atomic_u_t	dss_prec_default = ATOMIC_INIT(
     (unsigned)DSS_PREC_DEFAULT);
 
 /* Base address of the DSS. */
-static void		*dss_base;
+static void		*dss_base; /* 堆栈底部地址 */
 /* Atomic boolean indicating whether a thread is currently extending DSS. */
-static atomic_b_t	dss_extending;
+static atomic_b_t	dss_extending; /* bool值,用于标识是否有一个线程正在扩展dss */
 /* Atomic boolean indicating whether the DSS is exhausted. */
-static atomic_b_t	dss_exhausted;
+static atomic_b_t	dss_exhausted; /* DSS是否已经耗尽 */
 /* Atomic current upper limit on DSS addresses. */
 static atomic_p_t	dss_max; /* 堆栈顶部地址 */
 
@@ -73,6 +74,7 @@ extent_dss_extending_start(void) {
 	spin_t spinner = SPIN_INITIALIZER;
 	while (true) {
 		bool expected = false;
+        /* 标志正在扩展dss */
 		if (atomic_compare_exchange_weak_b(&dss_extending, &expected,
 		    true, ATOMIC_ACQ_REL, ATOMIC_RELAXED)) {
 			break;
@@ -80,7 +82,7 @@ extent_dss_extending_start(void) {
 		spin_adaptive(&spinner);
 	}
 }
-
+/* 执行sbrk结束 */
 static void
 extent_dss_extending_finish(void) {
 	assert(atomic_load_b(&dss_extending, ATOMIC_RELAXED));
@@ -129,7 +131,9 @@ extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 	if (gap == NULL) {
 		return NULL;
 	}
-    /* 保证没有线程在分配内存(sbark) */
+    /* 保证没有线程在分配内存(sbark)
+     * 类似于加锁操作
+     */
 	extent_dss_extending_start();
 	if (!atomic_load_b(&dss_exhausted, ATOMIC_ACQUIRE)) {
 		/*
@@ -244,6 +248,7 @@ extent_in_dss_helper(void *addr, void *max) {
 	    (uintptr_t)max);
 }
 
+/* 判断地址是否位于堆栈 */
 bool
 extent_in_dss(void *addr) {
 	cassert(have_dss);
@@ -252,6 +257,7 @@ extent_in_dss(void *addr) {
 	    ATOMIC_ACQUIRE));
 }
 
+/* 判断两个地址是否可以合并 */
 bool
 extent_dss_mergeable(void *addr_a, void *addr_b) {
 	void *max;

@@ -10,6 +10,7 @@
 #include "jemalloc/internal/mutex.h"
 #include "jemalloc/internal/mutex_pool.h"
 
+/* extentç”¨äºç®¡ç†å†…å­˜ */
 /******************************************************************************/
 /* Data. */
 
@@ -64,7 +65,7 @@ static bool extent_merge_impl(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *a, extent_t *b,
     bool growing_retained);
 
-/* º¯ÊıÔ­ĞÍ */
+/* å‡½æ•°åŸå‹ */
 const extent_hooks_t	extent_hooks_default = {
 	extent_alloc_default,
 	extent_dalloc_default,
@@ -177,14 +178,14 @@ extent_lock_from_addr(tsdn_t *tsdn, rtree_ctx_t *rtree_ctx, void *addr,
 	return ret;
 }
 
-/* Îªextent·ÖÅäÄÚ´æ */
+/* ä¸ºextentåˆ†é…å†…å­˜ */
 extent_t *
 extent_alloc(tsdn_t *tsdn, arena_t *arena) {
 	malloc_mutex_lock(tsdn, &arena->extent_avail_mtx);
 	extent_t *extent = extent_avail_first(&arena->extent_avail);
 	if (extent == NULL) {
 		malloc_mutex_unlock(tsdn, &arena->extent_avail_mtx);
-		return base_alloc_extent(tsdn, arena->base);
+		return base_alloc_extent(tsdn, arena->base); /* å…ƒæ•°æ®ä¸“ç”¨baseåˆ†é…å™¨ */
 	}
 	extent_avail_remove(&arena->extent_avail, extent);
 	atomic_fetch_sub_zu(&arena->extent_avail_cnt, 1, ATOMIC_RELAXED);
@@ -518,6 +519,7 @@ extents_fit_locked(tsdn_t *tsdn, arena_t *arena, extents_t *extents,
 	return extent;
 }
 
+/* å°è¯•è¿›è¡Œåˆå¹¶ */
 static bool
 extent_try_delayed_coalesce(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, rtree_ctx_t *rtree_ctx, extents_t *extents,
@@ -535,7 +537,7 @@ extent_try_delayed_coalesce(tsdn_t *tsdn, arena_t *arena,
 	return false;
 }
 
-/* ·ÖÅäextent
+/* åˆ†é…extent
  *
  */
 extent_t *
@@ -553,8 +555,8 @@ extents_alloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	return extent;
 }
 
-/* extent»ØÊÕ
- * @param tsdn tsd¾ä±ú
+/* extentå›æ”¶
+ * @param tsdn tsdå¥æŸ„
  * @param arena
  */
 void
@@ -1133,7 +1135,7 @@ extent_need_manual_zero(arena_t *arena) {
  * Tries to satisfy the given allocation request by reusing one of the extents
  * in the given extents_t.
  */
-/* ³¢ÊÔ¸´ÓÃextent
+/* å°è¯•å¤ç”¨extent
  */
 static extent_t *
 extent_recycle(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
@@ -1216,7 +1218,7 @@ extent_recycle(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
  * advantage of this to avoid demanding zeroed extents, but taking advantage of
  * them if they are returned.
  */
-/* Èç¹ûµ÷ÓÃÕßÖ¸¶¨ÁË(!*zero),ÈÔÈ»ÓĞ¿ÉÄÜ·µ»ØÇåÁãºóµÄÄÚ´æ */
+/* å¦‚æœè°ƒç”¨è€…æŒ‡å®šäº†(!*zero),ä»ç„¶æœ‰å¯èƒ½è¿”å›æ¸…é›¶åçš„å†…å­˜ */
 static void *
 extent_alloc_core(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
     size_t alignment, bool *zero, bool *commit, dss_prec_t dss_prec) {
@@ -1226,7 +1228,7 @@ extent_alloc_core(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
 	assert(alignment != 0);
 
 	/* "primary" dss. */
-    /* dss×÷ÎªÖ÷ÒªµÄ·ÖÅäÊÖ¶Î */
+    /* dssä½œä¸ºä¸»è¦çš„åˆ†é…æ‰‹æ®µ */
 	if (have_dss && dss_prec == dss_prec_primary && (ret =
 	    extent_alloc_dss(tsdn, arena, new_addr, size, alignment, zero,
 	    commit)) != NULL) {
@@ -1260,7 +1262,7 @@ extent_alloc_default_impl(tsdn_t *tsdn, arena_t *arena, void *new_addr,
 	return ret;
 }
 
-/* ·ÖÅäextent
+/* åˆ†é…extent
  *
  */
 static void *
@@ -1572,6 +1574,7 @@ extent_alloc_wrapper(tsdn_t *tsdn, arena_t *arena,
 	return extent;
 }
 
+/* åˆ¤æ–­ä¸¤ä¸ªextentæ˜¯å¦å¯ä»¥åˆå¹¶ */
 static bool
 extent_can_coalesce(arena_t *arena, extents_t *extents, const extent_t *inner,
     const extent_t *outer) {
@@ -1592,6 +1595,7 @@ extent_can_coalesce(arena_t *arena, extents_t *extents, const extent_t *inner,
 	return true;
 }
 
+/* extentèšé›† */
 static bool
 extent_coalesce(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
     extents_t *extents, extent_t *inner, extent_t *outer, bool forward,
@@ -2209,6 +2213,7 @@ extent_merge_default_impl(void *addr_a, void *addr_b) {
  * Returns true if the given extents can't be merged because of their head bit
  * settings.  Assumes the second extent has the higher address.
  */
+/* åˆ¤æ–­ä¸¤ä¸ªextentæ˜¯å¦å¯ä»¥åˆå¹¶ */
 static bool
 extent_head_no_merge(extent_t *a, extent_t *b) {
 	assert(extent_base_get(a) < extent_base_get(b));

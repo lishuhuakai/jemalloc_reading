@@ -72,7 +72,7 @@ bool	opt_xmalloc = false;
 bool	opt_zero = false;
 unsigned	opt_narenas = 0;
 
-unsigned	ncpus;
+unsigned	ncpus; /* cpu个数 */
 
 /* Protects arenas initialization. */
 malloc_mutex_t arenas_lock;
@@ -731,6 +731,7 @@ jemalloc_secure_getenv(const char *name) {
 #endif
 }
 
+/* 获取cpu个数 */
 static unsigned
 malloc_ncpus(void) {
 	long result;
@@ -1585,7 +1586,7 @@ static bool
 malloc_init_hard_recursible(void) {
 	malloc_init_state = malloc_init_recursible;
 
-	ncpus = malloc_ncpus();
+	ncpus = malloc_ncpus(); /* 获得cpu个数 */
 
 #if (defined(JEMALLOC_HAVE_PTHREAD_ATFORK) && !defined(JEMALLOC_MUTEX_INIT_CB) \
     && !defined(JEMALLOC_ZONE) && !defined(_WIN32) && \
@@ -1775,6 +1776,7 @@ malloc_init_hard(void) {
 	/* Set reentrancy level to 1 during init. */
 	pre_reentrancy(tsd, NULL);
 	/* Initialize narenas before prof_boot2 (for allocation). */
+    /* 确定anera的个数 */
 	if (malloc_init_narenas() || background_thread_boot1(tsd_tsdn(tsd))) {
 		UNLOCK_RETURN(tsd_tsdn(tsd), true, true)
 	}

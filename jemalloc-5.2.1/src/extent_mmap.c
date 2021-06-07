@@ -5,9 +5,11 @@
 #include "jemalloc/internal/assert.h"
 #include "jemalloc/internal/extent_mmap.h"
 
+/* 通过mmap来向操作系统请求内存 */
 /******************************************************************************/
 /* Data. */
 
+/* opt_retain表示是否回收未使用的虚拟内存,一般设置为false */
 bool	opt_retain =
 #ifdef JEMALLOC_RETAIN
     true

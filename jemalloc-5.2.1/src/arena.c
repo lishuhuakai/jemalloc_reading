@@ -954,6 +954,10 @@ arena_decay_to_limit(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
 	decay->purging = false;
 }
 
+/*
+ * @param extents 待回收的extent组成的链表
+ * @param all 是否全部回收
+ */
 static bool
 arena_decay_impl(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
     extents_t *extents, bool is_background_thread, bool all) {
@@ -989,9 +993,12 @@ arena_decay_impl(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
 	return false;
 }
 
+/* arena进行内存回收操作
+ * @param is_backgroud_thread 是否为后台线程
+ * @param all 是否全部进行回收
+ */
 static bool
-arena_decay_dirty(tsdn_t *tsdn, arena_t *arena, bool is_background_thread,
-    bool all) {
+arena_decay_dirty(tsdn_t *tsdn, arena_t *arena, bool is_background_thread, bool all) {
 	return arena_decay_impl(tsdn, arena, &arena->decay_dirty,
 	    &arena->extents_dirty, is_background_thread, all);
 }

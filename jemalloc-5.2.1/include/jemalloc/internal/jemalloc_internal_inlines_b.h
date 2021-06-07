@@ -77,6 +77,7 @@ arena_is_auto(arena_t *arena) {
 	return (arena_ind_get(arena) < manual_arena_base);
 }
 
+/* 根据地址,反方向得到地址所属的extent */
 JEMALLOC_ALWAYS_INLINE extent_t *
 iealloc(tsdn_t *tsdn, const void *ptr) {
 	rtree_ctx_t rtree_ctx_fallback;
