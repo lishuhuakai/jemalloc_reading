@@ -37,6 +37,7 @@ extern size_t sz_index2size_tab[SC_NSIZES];
  * size classes.  In order to reduce cache footprint, the table is compressed,
  * and all accesses are via sz_size2index().
  */
+/* 这个数组主要是为了加快查找速度 */
 extern uint8_t sz_size2index_tab[];
 
 static const size_t sz_large_pad =
@@ -117,6 +118,9 @@ sz_psz2u(size_t psz) {
 	return usize;
 }
 
+/* 通过大小来计算索引值
+ *
+ */
 static inline szind_t
 sz_size2index_compute(size_t size) {
 	if (unlikely(size > SC_LARGE_MAXCLASS)) {
@@ -128,24 +132,28 @@ sz_size2index_compute(size_t size) {
 	}
 #if (SC_NTINY != 0)
 	if (size <= (ZU(1) << SC_LG_TINY_MAXCLASS)) {
+        /* 在tiny class中找 */
 		szind_t lg_tmin = SC_LG_TINY_MAXCLASS - SC_NTINY + 1;
 		szind_t lg_ceil = lg_floor(pow2_ceil_zu(size));
+        /* lg_ceil < lg_tmin表示size太小了,直接返回0
+         * 否则返回相对于lg_tmin的偏移量
+         */
 		return (lg_ceil < lg_tmin ? 0 : lg_ceil - lg_tmin);
 	}
 #endif
 	{
-		szind_t x = lg_floor((size<<1)-1);
+		szind_t x = lg_floor((size<<1)-1); /* 2^x >= size */
 		szind_t shift = (x < SC_LG_NGROUP + LG_QUANTUM) ? 0 :
-		    x - (SC_LG_NGROUP + LG_QUANTUM);
-		szind_t grp = shift << SC_LG_NGROUP;
-
+		    x - (SC_LG_NGROUP + LG_QUANTUM); /* 偏移量,也就是属于哪一个group */
+		szind_t grp = shift << SC_LG_NGROUP;  /* 每一个group都包含2^SC_LG_NGROUP个size classes */
 		szind_t lg_delta = (x < SC_LG_NGROUP + LG_QUANTUM + 1)
 		    ? LG_QUANTUM : x - SC_LG_NGROUP - 1;
 
 		size_t delta_inverse_mask = ZU(-1) << lg_delta;
+        /* mod计算的是组内的偏移 */
 		szind_t mod = ((((size-1) & delta_inverse_mask) >> lg_delta)) &
 		    ((ZU(1) << SC_LG_NGROUP) - 1);
-
+        /* 计算得到在sc数组中的偏移 */
 		szind_t index = SC_NTINY + grp + mod;
 		return index;
 	}
@@ -164,12 +172,13 @@ sz_size2index_lookup(size_t size) {
  */
 JEMALLOC_ALWAYS_INLINE szind_t
 sz_size2index(size_t size) {
-	if (likely(size <= SC_LOOKUP_MAXCLASS)) {
+	if (likely(size <= SC_LOOKUP_MAXCLASS)) { /* 抵消小于SC_LOOKUP_MAXCLASS的,可以以空间换时间 */
 		return sz_size2index_lookup(size);
 	}
-	return sz_size2index_compute(size);
+	return sz_size2index_compute(size); /* 否则就要计算 */
 }
 
+/* 通过index值,计算size class的大小 */
 static inline size_t
 sz_index2size_compute(szind_t index) {
 #if (SC_NTINY > 0)
@@ -178,14 +187,14 @@ sz_index2size_compute(szind_t index) {
 	}
 #endif
 	{
+	    /*  */
 		size_t reduced_index = index - SC_NTINY;
-		size_t grp = reduced_index >> SC_LG_NGROUP;
-		size_t mod = reduced_index & ((ZU(1) << SC_LG_NGROUP) -
-		    1);
+		size_t grp = reduced_index >> SC_LG_NGROUP; /* 计算属于哪一个group */
+		size_t mod = reduced_index & ((ZU(1) << SC_LG_NGROUP) - 1); /* group内偏移 */
 
 		size_t grp_size_mask = ~((!!grp)-1);
 		size_t grp_size = ((ZU(1) << (LG_QUANTUM +
-		    (SC_LG_NGROUP-1))) << grp) & grp_size_mask;
+		    (SC_LG_NGROUP-1))) << grp) & grp_size_mask; /* 该组内第一个size class的大小 */
 
 		size_t shift = (grp == 0) ? 1 : grp;
 		size_t lg_delta = shift + (LG_QUANTUM-1);
@@ -196,6 +205,8 @@ sz_index2size_compute(szind_t index) {
 	}
 }
 
+/* 通过index来反向查找size class的大小
+ */
 JEMALLOC_ALWAYS_INLINE size_t
 sz_index2size_lookup(szind_t index) {
 	size_t ret = (size_t)sz_index2size_tab[index];

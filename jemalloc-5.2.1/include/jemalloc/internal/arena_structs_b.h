@@ -14,6 +14,7 @@
 #include "jemalloc/internal/smoothstep.h"
 #include "jemalloc/internal/ticker.h"
 
+/* 记录与内存回收相关的内容 */
 struct arena_decay_s {
 	/* Synchronizes all non-atomic fields. */
 	malloc_mutex_t		mtx;
@@ -145,14 +146,14 @@ struct arena_s {
 	 *
 	 * Synchronization: atomic.
 	 */
-	atomic_zu_t		nactive;
+	atomic_zu_t		nactive; /* active extents中页的个数 */
 
 	/*
 	 * Extant large allocations.
 	 *
 	 * Synchronization: large_mtx.
 	 */
-	extent_list_t		large;
+	extent_list_t		large; /* 大内存块组成的list */
 	/* Synchronizes all large allocation/update/deallocation. */
 	malloc_mutex_t		large_mtx;
 

@@ -29,8 +29,8 @@ const char *percpu_arena_mode_names[] = {
 };
 percpu_arena_mode_t opt_percpu_arena = PERCPU_ARENA_DEFAULT;
 
-ssize_t opt_dirty_decay_ms = DIRTY_DECAY_MS_DEFAULT; /*  */
-ssize_t opt_muzzy_decay_ms = MUZZY_DECAY_MS_DEFAULT;
+ssize_t opt_dirty_decay_ms = DIRTY_DECAY_MS_DEFAULT; /* 默认10s回收 */
+ssize_t opt_muzzy_decay_ms = MUZZY_DECAY_MS_DEFAULT;  /* 默认为0 */
 
 static atomic_zd_t dirty_decay_ms_default;
 static atomic_zd_t muzzy_decay_ms_default;
@@ -253,17 +253,16 @@ arena_stats_merge(tsdn_t *tsdn, arena_t *arena, unsigned *nthreads,
 }
 
 /* arena内存释放
- *
+ * @param extent 待释放的extent
  */
 void
 arena_extents_dirty_dalloc(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent) {
 	witness_assert_depth_to_rank(tsdn_witness_tsdp_get(tsdn),
 	    WITNESS_RANK_CORE, 0);
-
-	extents_dalloc(tsdn, arena, r_extent_hooks, &arena->extents_dirty,
-	    extent);
-	if (arena_dirty_decay_ms_get(arena) == 0) {
+    /* 将extent放入extens_dirty队列 */
+	extents_dalloc(tsdn, arena, r_extent_hooks, &arena->extents_dirty, extent);
+	if (arena_dirty_decay_ms_get(arena) == 0) { /* 立马进行内存回收工作 */
 		arena_decay_dirty(tsdn, arena, false, true);
 	} else {
 		arena_background_thread_inactivity_check(tsdn, arena, false);
@@ -296,7 +295,7 @@ arena_slab_reg_alloc(extent_t *slab, const bin_info_t *bin_info) {
 static void
 arena_slab_reg_alloc_batch(extent_t *slab, const bin_info_t *bin_info,
 			   unsigned cnt, void** ptrs) {
-	arena_slab_data_t *slab_data = extent_slab_data_get(slab);
+	arena_slab_data_t *slab_data = extent_slab_data_get(slab); /* 获取位图数据 */
 
 	assert(extent_nfree_get(slab) >= cnt);
 	assert(!bitmap_full(slab_data->bitmap, &bin_info->bitmap_info));
@@ -335,7 +334,7 @@ arena_slab_reg_alloc_batch(extent_t *slab, const bin_info_t *bin_info,
 
 			i++;
 		}
-		slab_data->bitmap[group] = g;
+		slab_data->bitmap[group] = g; /* 标记对应的bit位 */
 	}
 #endif
 	extent_nfree_sub(slab, cnt);
@@ -365,17 +364,19 @@ arena_slab_regind(extent_t *slab, szind_t binind, const void *ptr) {
 	return regind;
 }
 
+
 static void
 arena_slab_reg_dalloc(extent_t *slab, arena_slab_data_t *slab_data, void *ptr) {
-	szind_t binind = extent_szind_get(slab);
+	szind_t binind = extent_szind_get(slab); /* slab级别 */
 	const bin_info_t *bin_info = &bin_infos[binind];
-	size_t regind = arena_slab_regind(slab, binind, ptr);
+	size_t regind = arena_slab_regind(slab, binind, ptr); /* 获取bitmap的位置 */
 
 	assert(extent_nfree_get(slab) < bin_info->nregs);
 	/* Freeing an unallocated pointer can cause assertion failure. */
 	assert(bitmap_get(slab_data->bitmap, &bin_info->bitmap_info, regind));
-
+    /* 将标记取消 */
 	bitmap_unset(slab_data->bitmap, &bin_info->bitmap_info, regind);
+    /* 空闲空间+1 */
 	extent_nfree_inc(slab);
 }
 
@@ -434,6 +435,11 @@ arena_may_have_muzzy(arena_t *arena) {
 	return (pages_can_purge_lazy && (arena_muzzy_decay_ms_get(arena) != 0));
 }
 
+/* extent可以简单认为是分配的内存
+ * @param usize 内存块大小
+ * @param alignment 对齐
+ *
+ */
 extent_t *
 arena_extent_alloc_large(tsdn_t *tsdn, arena_t *arena, size_t usize,
     size_t alignment, bool *zero) {
@@ -445,9 +451,11 @@ arena_extent_alloc_large(tsdn_t *tsdn, arena_t *arena, size_t usize,
 	szind_t szind = sz_size2index(usize);
 	size_t mapped_add;
 	bool commit = true;
+    /* 优先复用extents_dirty上的extent */
 	extent_t *extent = extents_alloc(tsdn, arena, &extent_hooks,
 	    &arena->extents_dirty, NULL, usize, sz_large_pad, alignment, false,
 	    szind, zero, &commit);
+    /* 其次复用extents_muzzy上的extent */
 	if (extent == NULL && arena_may_have_muzzy(arena)) {
 		extent = extents_alloc(tsdn, arena, &extent_hooks,
 		    &arena->extents_muzzy, NULL, usize, sz_large_pad, alignment,
@@ -455,6 +463,7 @@ arena_extent_alloc_large(tsdn_t *tsdn, arena_t *arena, size_t usize,
 	}
 	size_t size = usize + sz_large_pad;
 	if (extent == NULL) {
+        /* 没有找到才进行实际的分配 */
 		extent = extent_alloc_wrapper(tsdn, arena, &extent_hooks, NULL,
 		    usize, sz_large_pad, alignment, false, szind, zero,
 		    &commit);
@@ -621,7 +630,7 @@ static void
 arena_decay_try_purge(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
     extents_t *extents, size_t current_npages, size_t npages_limit,
     bool is_background_thread) {
-	if (current_npages > npages_limit) {
+	if (current_npages > npages_limit) { /* 超过上限,进行回收操作 */
 		arena_decay_to_limit(tsdn, arena, decay, extents, false,
 		    npages_limit, current_npages - npages_limit,
 		    is_background_thread);
@@ -655,7 +664,8 @@ arena_decay_epoch_advance_helper(arena_decay_t *decay, const nstime_t *time,
 static void
 arena_decay_epoch_advance(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
     extents_t *extents, const nstime_t *time, bool is_background_thread) {
-	size_t current_npages = extents_npages_get(extents);
+	size_t current_npages = extents_npages_get(extents); /* 页的个数 */
+    /* 更新新的deadline */
 	arena_decay_epoch_advance_helper(decay, time, current_npages);
 
 	size_t npages_limit = arena_decay_backlog_npages_limit(decay);
@@ -720,6 +730,9 @@ arena_decay_ms_valid(ssize_t decay_ms) {
 	return false;
 }
 
+/* 判断能否进行内存回收
+ *
+ */
 static bool
 arena_maybe_decay(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
     extents_t *extents, bool is_background_thread) {
@@ -764,6 +777,7 @@ arena_maybe_decay(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
 	 * epoch, so as a result purging only happens during epoch advances, or
 	 * being triggered by background threads (scheduled event).
 	 */
+	/* 如果已经达到了回收的时间,更新当前的epoch, */
 	bool advance_epoch = arena_decay_deadline_reached(decay, &time);
 	if (advance_epoch) {
 		arena_decay_epoch_advance(tsdn, arena, decay, extents, &time,
@@ -830,6 +844,10 @@ arena_muzzy_decay_ms_set(tsdn_t *tsdn, arena_t *arena,
 	    &arena->extents_muzzy, decay_ms);
 }
 
+/*
+ * @param npages_decay_max 最多回收的页的个数
+ * @param decay_extents 要回收的extent将放入此链表
+ */
 static size_t
 arena_stash_decayed(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extents_t *extents, size_t npages_limit,
@@ -849,6 +867,10 @@ arena_stash_decayed(tsdn_t *tsdn, arena_t *arena,
 	return nstashed;
 }
 
+/* 执行回收工作
+ * @param decay_extents 待回收的extent组成的链表
+ * @param all 是否要全部回收
+ */
 static size_t
 arena_decay_stashed(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, arena_decay_t *decay, extents_t *extents,
@@ -861,24 +883,26 @@ arena_decay_stashed(tsdn_t *tsdn, arena_t *arena,
 		nunmapped = 0;
 	}
 	npurged = 0;
-
-	ssize_t muzzy_decay_ms = arena_muzzy_decay_ms_get(arena);
+    /* 先将脏页回收到muzzy队列 */
+	ssize_t muzzy_decay_ms = arena_muzzy_decay_ms_get(arena); /* 回收时间间隔 */
 	for (extent_t *extent = extent_list_first(decay_extents); extent !=
 	    NULL; extent = extent_list_first(decay_extents)) {
 		if (config_stats) {
 			nmadvise++;
 		}
-		size_t npages = extent_size_get(extent) >> LG_PAGE;
+		size_t npages = extent_size_get(extent) >> LG_PAGE; /* 页的个数 */
 		npurged += npages;
-		extent_list_remove(decay_extents, extent);
+		extent_list_remove(decay_extents, extent); /* 从链表中移除 */
 		switch (extents_state_get(extents)) {
 		case extent_state_active:
 			not_reached();
 		case extent_state_dirty:
+            /* dirty -> muzzy */
 			if (!all && muzzy_decay_ms != 0 &&
 			    !extent_purge_lazy_wrapper(tsdn, arena,
 			    r_extent_hooks, extent, 0,
 			    extent_size_get(extent))) {
+			    /* 将extent放入extents_muzzy中 */
 				extents_dalloc(tsdn, arena, r_extent_hooks,
 				    &arena->extents_muzzy, extent);
 				arena_background_thread_inactivity_check(tsdn,
@@ -887,6 +911,7 @@ arena_decay_stashed(tsdn_t *tsdn, arena_t *arena,
 			}
 			/* Fall through. */
 		case extent_state_muzzy:
+            /* muzzy -> retained */
 			extent_dalloc_wrapper(tsdn, arena, r_extent_hooks,
 			    extent);
 			if (config_stats) {
@@ -921,6 +946,11 @@ arena_decay_stashed(tsdn_t *tsdn, arena_t *arena,
  * bound on number of pages in order to prevent unbounded growth (namely in
  * stashed), otherwise unbounded new pages could be added to extents during the
  * current decay run, so that the purging thread never finishes.
+ */
+/* 执行回收操作
+ * @param npages_limit
+ * @param npages_decay_max 最多回收的页的个数
+ * @param is_backgroud_thread 是否要启动后台线程
  */
 static void
 arena_decay_to_limit(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
@@ -1010,6 +1040,7 @@ arena_decay_muzzy(tsdn_t *tsdn, arena_t *arena, bool is_background_thread,
 	    &arena->extents_muzzy, is_background_thread, all);
 }
 
+/* 进行内存的回收工作 */
 void
 arena_decay(tsdn_t *tsdn, arena_t *arena, bool is_background_thread, bool all) {
 	if (arena_decay_dirty(tsdn, arena, is_background_thread, all)) {
@@ -1018,6 +1049,7 @@ arena_decay(tsdn_t *tsdn, arena_t *arena, bool is_background_thread, bool all) {
 	arena_decay_muzzy(tsdn, arena, is_background_thread, all);
 }
 
+/* 内存回收 */
 static void
 arena_slab_dalloc(tsdn_t *tsdn, arena_t *arena, extent_t *slab) {
 	arena_nactive_sub(arena, extent_size_get(slab) >> LG_PAGE);
@@ -1059,7 +1091,7 @@ arena_bin_slabs_nonfull_tryget(bin_t *bin) {
 	return slab;
 }
 
-/* 将slab插入到bin的slas_full链表之中 */
+/* 将slab插入到bin的slabs_full链表之中 */
 static void
 arena_bin_slabs_full_insert(arena_t *arena, bin_t *bin, extent_t *slab) {
 	assert(extent_nfree_get(slab) == 0); /* 已经没有内存可供分配了 */
@@ -1223,6 +1255,9 @@ arena_destroy(tsd_t *tsd, arena_t *arena) {
 	base_delete(tsd_tsdn(tsd), arena->base);
 }
 
+/* 分配extent结构
+ *
+ */
 static extent_t *
 arena_slab_alloc_hard(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, const bin_info_t *bin_info,
@@ -1261,6 +1296,7 @@ arena_slab_alloc(tsdn_t *tsdn, arena_t *arena, szind_t binind, unsigned binshard
 	szind_t szind = sz_size2index(bin_info->reg_size);
 	bool zero = false;
 	bool commit = true;
+    /* 分配一个extent,分配规则,先尝试复用,不能复用,再分配 */
 	extent_t *slab = extents_alloc(tsdn, arena, &extent_hooks,
 	    &arena->extents_dirty, NULL, bin_info->slab_size, 0, PAGE, true,
 	    binind, &zero, &commit);
@@ -1309,6 +1345,7 @@ arena_bin_nonfull_slab_get(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 	/* Allocate a new slab. */
 	malloc_mutex_unlock(tsdn, &bin->lock);
 	/******************************/
+    /* 分配新的slab */
 	slab = arena_slab_alloc(tsdn, arena, binind, binshard, bin_info);
 	/********************************/
 	malloc_mutex_lock(tsdn, &bin->lock);
@@ -1334,6 +1371,9 @@ arena_bin_nonfull_slab_get(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 }
 
 /* Re-fill bin->slabcur, then call arena_slab_reg_alloc(). */
+/*
+ * @return 分配的内存的首地址
+ */
 static void *
 arena_bin_malloc_hard(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
     szind_t binind, unsigned binshard) {
@@ -1435,7 +1475,7 @@ arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
 		if ((slab = bin->slabcur) != NULL && extent_nfree_get(slab) > 0) {
 			unsigned tofill = nfill - i;
 			cnt = tofill < extent_nfree_get(slab) ?
-				tofill : extent_nfree_get(slab);
+				tofill : extent_nfree_get(slab); /*  */
             /* 从slab中分配内存块到tbin->avail数组中 */
 			arena_slab_reg_alloc_batch(
 			   slab, &bin_infos[binind], cnt,
@@ -1660,6 +1700,9 @@ arena_dalloc_promoted(tsdn_t *tsdn, void *ptr, tcache_t *tcache,
 	}
 }
 
+/* 断开slab和bin的联系
+ *
+ */
 static void
 arena_dissociate_bin_slab(arena_t *arena, extent_t *slab, bin_t *bin) {
 	/* Dissociate slab from bin. */
@@ -1674,6 +1717,7 @@ arena_dissociate_bin_slab(arena_t *arena, extent_t *slab, bin_t *bin) {
 		 * slab only contains one region, then it never gets inserted
 		 * into the non-full slabs heap.
 		 */
+		 /* 如果slab只包含1个region,那它不能被插入non-full slabs heap中 */
 		if (bin_info->nregs == 1) {
 			arena_bin_slabs_full_remove(arena, bin, slab);
 		} else {
@@ -1710,6 +1754,7 @@ arena_bin_lower_slab(tsdn_t *tsdn, arena_t *arena, extent_t *slab,
 	 */
 	if (bin->slabcur != NULL && extent_snad_comp(bin->slabcur, slab) > 0) {
 		/* Switch slabcur. */
+        /* 将bin->slabcur切换为本slab,如果本slab的序列号更小(更旧),将替换后的bin->slabcur放入slabs_nonfull */
 		if (extent_nfree_get(bin->slabcur) > 0) {
 			arena_bin_slabs_nonfull_insert(bin, bin->slabcur);
 		} else {
@@ -1724,20 +1769,26 @@ arena_bin_lower_slab(tsdn_t *tsdn, arena_t *arena, extent_t *slab,
 	}
 }
 
+/*
+ * @param binind 索引值
+ * @param junked 是否要填充垃圾值
+ * @param slab 要回收的内存所属的extent
+ */
 static void
 arena_dalloc_bin_locked_impl(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
     szind_t binind, extent_t *slab, void *ptr, bool junked) {
-	arena_slab_data_t *slab_data = extent_slab_data_get(slab);
+	arena_slab_data_t *slab_data = extent_slab_data_get(slab); /* 获取位图信息 */
 	const bin_info_t *bin_info = &bin_infos[binind];
 
 	if (!junked && config_fill && unlikely(opt_junk_free)) {
 		arena_dalloc_junk_small(ptr, bin_info);
 	}
-
+    /* 将对应的标记清空 */
 	arena_slab_reg_dalloc(slab, slab_data, ptr);
 	unsigned nfree = extent_nfree_get(slab);
-	if (nfree == bin_info->nregs) {
+	if (nfree == bin_info->nregs) { /* 这里说明slab中没有任何内存被分配出去了 */
 		arena_dissociate_bin_slab(arena, slab, bin);
+        /* 进行回收操作 */
 		arena_dalloc_bin_slab(tsdn, arena, slab, bin);
 	} else if (nfree == 1 && slab != bin->slabcur) {
 		arena_bin_slabs_full_remove(arena, bin, slab);
@@ -1757,9 +1808,12 @@ arena_dalloc_bin_junked_locked(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 	    true);
 }
 
+/*
+ *
+ */
 static void
 arena_dalloc_bin(tsdn_t *tsdn, arena_t *arena, extent_t *extent, void *ptr) {
-	szind_t binind = extent_szind_get(extent);
+	szind_t binind = extent_szind_get(extent); /* extent的内存级别 */
 	unsigned binshard = extent_binshard_get(extent);
 	bin_t *bin = &arena->bins[binind].bin_shards[binshard];
 
@@ -1769,6 +1823,9 @@ arena_dalloc_bin(tsdn_t *tsdn, arena_t *arena, extent_t *extent, void *ptr) {
 	malloc_mutex_unlock(tsdn, &bin->lock);
 }
 
+/* 小内存释放
+ * @param ptr 内存首地址
+ */
 void
 arena_dalloc_small(tsdn_t *tsdn, void *ptr) {
 	extent_t *extent = iealloc(tsdn, ptr);
@@ -2209,6 +2266,7 @@ arena_is_huge(unsigned arena_ind) {
 	return (arena_ind == huge_arena_ind);
 }
 
+/* arena模块的初始化 */
 void
 arena_boot(sc_data_t *sc_data) {
 	arena_dirty_decay_ms_default_set(opt_dirty_decay_ms);

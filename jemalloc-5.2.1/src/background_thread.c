@@ -12,7 +12,9 @@ JEMALLOC_DIAGNOSTIC_DISABLE_SPURIOUS
 /* This option should be opt-in only. */
 #define BACKGROUND_THREAD_DEFAULT false
 /* Read-only after initialization. */
+/* 是否允许后台进程 */
 bool opt_background_thread = BACKGROUND_THREAD_DEFAULT;
+/* 后台进程的个数 */
 size_t opt_max_background_threads = MAX_BACKGROUND_THREAD_LIMIT + 1;
 
 /* Used for thread creation, termination and stats. */

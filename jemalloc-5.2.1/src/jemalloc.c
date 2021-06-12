@@ -72,7 +72,7 @@ bool	opt_xmalloc = false;
 bool	opt_zero = false;
 unsigned	opt_narenas = 0;
 
-unsigned	ncpus; /* cpu���� */
+unsigned	ncpus; /* cpu的个数 */
 
 /* Protects arenas initialization. */
 malloc_mutex_t arenas_lock;
@@ -86,12 +86,15 @@ malloc_mutex_t arenas_lock;
  *
  * Points to an arena_t.
  */
+/* arenas[0, narenas_auto)用于automatic multiplexing of threads and arenas.
+ * arenas[narenas_auto, narenas_total) 进程创建的?
+ */
 JEMALLOC_ALIGNED(CACHELINE)
-atomic_p_t		arenas[MALLOCX_ARENA_LIMIT];
+atomic_p_t		arenas[MALLOCX_ARENA_LIMIT]; /* 全局数组,记录arena结构的指针 */
 static atomic_u_t	narenas_total; /* Use narenas_total_*(). */
 /* Below three are read-only after initialization. */
 static arena_t		*a0; /* arenas[0]. */
-unsigned		narenas_auto;
+unsigned		narenas_auto; /* 一般值为1 */
 unsigned		manual_arena_base;
 
 typedef enum {
@@ -235,7 +238,7 @@ malloc_init(void) {
  */
 
 /*
- * @param zero �Ƿ�Ҫ����
+ * @param zero 是否要进行清零操作
  */
 static void *
 a0ialloc(size_t size, bool zero, bool is_internal) {
@@ -319,7 +322,10 @@ narenas_total_get(void) {
 	return atomic_load_u(&narenas_total, ATOMIC_ACQUIRE);
 }
 
-/* Create a new arena and insert it into the arenas array at index ind. */
+/* Create a new arena and insert it into the arenas array at index ind.
+ * 创建一个新的arena
+ * @param ind arena的标识(或者说序号)
+ */
 static arena_t *
 arena_init_locked(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 	arena_t *arena;
@@ -1502,7 +1508,7 @@ malloc_init_hard_a0_locked() {
 	 * before sz_boot and bin_boot, which assume that the values they read
 	 * out of sc_data_global are final.
 	 */
-	sc_boot(&sc_data);
+	sc_boot(&sc_data); /* 初始化size class */
 	unsigned bin_shard_sizes[SC_NBINS];
 	bin_shard_sizes_boot(bin_shard_sizes);
 	/*
@@ -1511,10 +1517,10 @@ malloc_init_hard_a0_locked() {
 	 * it.
 	 */
 	if (config_prof) {
-		prof_boot0();
+		prof_boot0(); /* 堆内存分析初始化 */
 	}
 	malloc_conf_init(&sc_data, bin_shard_sizes);
-	sz_boot(&sc_data);
+	sz_boot(&sc_data); /* 用空间换时间,初始化索引数组 */
 	bin_boot(&sc_data, bin_shard_sizes);
 
 	if (opt_stats_print) {
@@ -1526,7 +1532,7 @@ malloc_init_hard_a0_locked() {
 			}
 		}
 	}
-	if (pages_boot()) {
+	if (pages_boot()) { /* 获取页大小 */
 		return true;
 	}
 	if (base_boot(TSDN_NULL)) {
@@ -1561,8 +1567,8 @@ malloc_init_hard_a0_locked() {
 	 * Initialize one arena here.  The rest are lazily created in
 	 * arena_choose_hard().
 	 */
-	if (arena_init(TSDN_NULL, 0, (extent_hooks_t *)&extent_hooks_default)
-	    == NULL) {
+	/* 初始化arena */
+	if (arena_init(TSDN_NULL, 0, (extent_hooks_t *)&extent_hooks_default) == NULL) {
 		return true;
 	}
 	a0 = arena_get(TSDN_NULL, 0, false);
@@ -1740,13 +1746,13 @@ malloc_init_hard_cleanup(tsdn_t *tsdn, bool reentrancy_set) {
 	}
 }
 
+/* 进行初始化操作
+ *
+ */
 static bool
 malloc_init_hard(void) {
 	tsd_t *tsd;
 
-#if defined(_WIN32) && _WIN32_WINNT < 0x0600
-	_init_init_lock();
-#endif
 	malloc_mutex_lock(TSDN_NULL, &init_lock);
 
 #define UNLOCK_RETURN(tsdn, ret, reentrancy)		\
@@ -1776,7 +1782,7 @@ malloc_init_hard(void) {
 	/* Set reentrancy level to 1 during init. */
 	pre_reentrancy(tsd, NULL);
 	/* Initialize narenas before prof_boot2 (for allocation). */
-    /* ȷ��anera�ĸ��� */
+    /* 确定arena的个数 */
 	if (malloc_init_narenas() || background_thread_boot1(tsd_tsdn(tsd))) {
 		UNLOCK_RETURN(tsd_tsdn(tsd), true, true)
 	}
@@ -1827,13 +1833,13 @@ malloc_init_hard(void) {
 typedef struct static_opts_s static_opts_t;
 struct static_opts_s {
 	/* Whether or not allocation size may overflow. */
-	bool may_overflow;
+	bool may_overflow; /* 分配的大小是否可能会溢出 */
 
 	/*
 	 * Whether or not allocations (with alignment) of size 0 should be
 	 * treated as size 1.
 	 */
-	bool bump_empty_aligned_alloc;
+	bool bump_empty_aligned_alloc; /* 分配大小为0的内存块,是否要认为大小为1 */
 	/*
 	 * Whether to assert that allocations are not of size 0 (after any
 	 * bumping).
@@ -1846,7 +1852,7 @@ struct static_opts_s {
 	 */
 	bool null_out_result_on_error;
 	/* Whether to set errno when we encounter an error condition. */
-	bool set_errno_on_error;
+	bool set_errno_on_error; /* 错误发生的时候,是否要设置错误号 */
 
 	/*
 	 * The minimum valid alignment for functions requesting aligned storage.
@@ -1854,7 +1860,7 @@ struct static_opts_s {
 	size_t min_alignment;
 
 	/* The error string to use if we oom. */
-	const char *oom_string;
+	const char *oom_string; /* 内存不足时应当打出的string */
 	/* The error string to use if the passed-in alignment is invalid. */
 	const char *invalid_alignment_string;
 
@@ -1899,8 +1905,8 @@ typedef struct dynamic_opts_s dynamic_opts_t;
 struct dynamic_opts_s {
 	void **result;
 	size_t usize;
-	size_t num_items;
-	size_t item_size;
+	size_t num_items; /* 要分配的item的个数 */
+	size_t item_size; /* 每一个item的大小 */
 	size_t alignment;
 	bool zero;
 	unsigned tcache_ind;
@@ -1919,6 +1925,9 @@ dynamic_opts_init(dynamic_opts_t *dynamic_opts) {
 	dynamic_opts->arena_ind = ARENA_IND_AUTOMATIC;
 }
 
+/* 内存分配
+ *
+ */
 /* ind is ignored if dopts->alignment > 0. */
 JEMALLOC_ALWAYS_INLINE void *
 imalloc_no_sample(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd,
@@ -1998,6 +2007,10 @@ imalloc_sample(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd,
  * Returns true if the allocation will overflow, and false otherwise.  Sets
  * *size to the product either way.
  */
+/* 如果分配会导致溢出,返回true
+ * *size将会填充上要分配的内存大小
+ */
+
 JEMALLOC_ALWAYS_INLINE bool
 compute_size_with_overflow(bool may_overflow, dynamic_opts_t *dopts,
     size_t *size) {
@@ -2058,8 +2071,7 @@ imalloc_body(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd) {
 	int8_t reentrancy_level;
 
 	/* Compute the amount of memory the user wants. */
-	if (unlikely(compute_size_with_overflow(sopts->may_overflow, dopts,
-	    &size))) {
+	if (unlikely(compute_size_with_overflow(sopts->may_overflow, dopts, &size))) {
 		goto label_oom;
 	}
 
@@ -2069,9 +2081,8 @@ imalloc_body(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd) {
 	}
 
 	/* This is the beginning of the "core" algorithm. */
-
 	if (dopts->alignment == 0) {
-		ind = sz_size2index(size);
+		ind = sz_size2index(size); /* 计算size对应的size class在sc数组中的下标 */
 		if (unlikely(ind >= SC_NSIZES)) {
 			goto label_oom;
 		}
@@ -2253,6 +2264,9 @@ imalloc_init_check(static_opts_t *sopts, dynamic_opts_t *dopts) {
 	return true;
 }
 
+/* 内存分配
+ * @param sopts, dopts 分配参数
+ */
 /* Returns the errno-style error code of the allocation. */
 JEMALLOC_ALWAYS_INLINE int
 imalloc(static_opts_t *sopts, dynamic_opts_t *dopts) {
@@ -2278,6 +2292,9 @@ imalloc(static_opts_t *sopts, dynamic_opts_t *dopts) {
 	}
 }
 
+/* 通过慢路径来分配内存
+ * @param size 要分配的内存的带下
+ */
 JEMALLOC_NOINLINE
 void *
 malloc_default(size_t size) {
@@ -2295,7 +2312,7 @@ malloc_default(size_t size) {
 	sopts.oom_string = "<jemalloc>: Error in malloc(): out of memory\n";
 
 	dopts.result = &ret;
-	dopts.num_items = 1;
+	dopts.num_items = 1; /* 分配1个大小为size的内存块 */
 	dopts.item_size = size;
 
 	imalloc(&sopts, &dopts);
@@ -2329,6 +2346,7 @@ malloc_default(size_t size) {
  * fastpath supports ticker and profiling, both of which will also
  * tail-call to the slowpath if they fire.
  */
+/* 内存分配 */
 JEMALLOC_EXPORT JEMALLOC_ALLOCATOR JEMALLOC_RESTRICT_RETURN
 void JEMALLOC_NOTHROW *
 JEMALLOC_ATTR(malloc) JEMALLOC_ALLOC_SIZE(1)
@@ -2351,7 +2369,7 @@ je_malloc(size_t size) {
 	}
 
 	szind_t ind = sz_size2index_lookup(size);
-	size_t usize;
+	size_t usize; /* usize >= size */
 	if (config_stats || config_prof) {
 		usize = sz_index2size(ind);
 	}
@@ -2564,6 +2582,9 @@ irealloc_prof(tsd_t *tsd, void *old_ptr, size_t old_usize, size_t usize,
 	return p;
 }
 
+/* 内存释放
+ * @param ptr 内存首地址
+ */
 JEMALLOC_ALWAYS_INLINE void
 ifree(tsd_t *tsd, void *ptr, tcache_t *tcache, bool slow_path) {
 	if (!slow_path) {
@@ -2578,7 +2599,8 @@ ifree(tsd_t *tsd, void *ptr, tcache_t *tcache, bool slow_path) {
 	assert(malloc_initialized() || IS_INITIALIZER);
 
 	alloc_ctx_t alloc_ctx;
-	rtree_ctx_t *rtree_ctx = tsd_rtree_ctx(tsd);
+	rtree_ctx_t *rtree_ctx = tsd_rtree_ctx(tsd); /* 获取对应的基数树 */
+    /* 读取对应的分配信息 */
 	rtree_szind_slab_read(tsd_tsdn(tsd), &extents_rtree, rtree_ctx,
 	    (uintptr_t)ptr, true, &alloc_ctx.szind, &alloc_ctx.slab);
 	assert(alloc_ctx.szind != SC_NSIZES);
@@ -2778,6 +2800,10 @@ je_realloc(void *ptr, size_t arg_size) {
 	return ret;
 }
 
+/* 走正常流程来释放内存
+ * @param ptr 内存首地址
+ */
+
 JEMALLOC_NOINLINE
 void
 free_default(void *ptr) {
@@ -2807,6 +2833,7 @@ free_default(void *ptr) {
 				tcache = NULL;
 			}
 			uintptr_t args_raw[3] = {(uintptr_t)ptr};
+            /* 从目前来看,hook_invoke_dalloc貌似没有被调用 */
 			hook_invoke_dalloc(hook_dalloc_free, ptr, args_raw);
 			ifree(tsd, ptr, tcache, true);
 		}
@@ -2814,6 +2841,10 @@ free_default(void *ptr) {
 	}
 }
 
+/* 快速释放内存
+ * @param ptr 内存首地址
+ * @param size 内存大小
+ */
 JEMALLOC_ALWAYS_INLINE
 bool free_fastpath(void *ptr, size_t size, bool size_hint) {
 	tsd_t *tsd = tsd_get(false);
@@ -2821,7 +2852,7 @@ bool free_fastpath(void *ptr, size_t size, bool size_hint) {
 		return false;
 	}
 
-	tcache_t *tcache = tsd_tcachep_get(tsd);
+	tcache_t *tcache = tsd_tcachep_get(tsd);  /* 获取对应的tcache */
 
 	alloc_ctx_t alloc_ctx;
 	/*
@@ -2856,7 +2887,7 @@ bool free_fastpath(void *ptr, size_t size, bool size_hint) {
 	if (unlikely(ticker_trytick(&tcache->gc_ticker))) {
 		return false;
 	}
-
+      /* 获取对应的bin */
 	cache_bin_t *bin = tcache_small_bin_get(tcache, alloc_ctx.szind);
 	cache_bin_info_t *bin_info = &tcache_bin_info[alloc_ctx.szind];
 	if (!cache_bin_dalloc_easy(bin, bin_info, ptr)) {
@@ -2870,6 +2901,7 @@ bool free_fastpath(void *ptr, size_t size, bool size_hint) {
 
 	return true;
 }
+
 
 JEMALLOC_EXPORT void JEMALLOC_NOTHROW
 je_free(void *ptr) {

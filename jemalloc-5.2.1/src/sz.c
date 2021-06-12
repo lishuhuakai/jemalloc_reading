@@ -1,6 +1,8 @@
 #include "jemalloc/internal/jemalloc_preamble.h"
 #include "jemalloc/internal/sz.h"
 
+/* 以空间换时间 */
+
 JEMALLOC_ALIGNED(CACHELINE)
 size_t sz_pind2sz_tab[SC_NPSIZES+1];
 
@@ -39,6 +41,7 @@ sz_boot_index2size_tab(const sc_data_t *sc_data) {
 JEMALLOC_ALIGNED(CACHELINE)
 uint8_t sz_size2index_tab[(SC_LOOKUP_MAXCLASS >> SC_LG_TINY_MIN) + 1];
 
+/* 初始化sz_size2index_tab */
 static void
 sz_boot_size2index_tab(const sc_data_t *sc_data) {
 	size_t dst_max = (SC_LOOKUP_MAXCLASS >> SC_LG_TINY_MIN) + 1;
@@ -51,7 +54,7 @@ sz_boot_size2index_tab(const sc_data_t *sc_data) {
 		size_t max_ind = ((sz + (ZU(1) << SC_LG_TINY_MIN) - 1)
 				   >> SC_LG_TINY_MIN);
 		for (; dst_ind <= max_ind && dst_ind < dst_max; dst_ind++) {
-			sz_size2index_tab[dst_ind] = sc_ind;
+			sz_size2index_tab[dst_ind] = sc_ind; /* 记录下索引值 */
 		}
 	}
 }

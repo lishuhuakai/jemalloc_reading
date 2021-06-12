@@ -67,6 +67,7 @@ struct extent_s {
 	 *
 	 * zeroed: The zeroed flag is used by extent recycling code to track
 	 *         whether memory is zero-filled.
+	 *         zero标记即被extent回收代码使用,用于表示内存是否被零填充
 	 *
 	 * state: The state flag is an extent_state_t.
 	 *
@@ -225,13 +226,13 @@ struct extents_s {
 	atomic_zu_t		npages;
 
 	/* All stored extents must be in the same state. */
-	extent_state_t		state;
+	extent_state_t		state; /* extents类型 */
 
 	/*
 	 * If true, delay coalescing until eviction; otherwise coalesce during
 	 * deallocation.
 	 */
-	bool			delay_coalesce;
+	bool			delay_coalesce; /* 是否要延迟合并 */
 };
 
 /*

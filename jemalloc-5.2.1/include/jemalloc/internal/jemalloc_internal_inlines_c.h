@@ -42,6 +42,7 @@ isalloc(tsdn_t *tsdn, const void *ptr) {
  * @param tsdn tsd句柄
  * @param size 要分配的内存大小
  * @param ind index值
+ * @param slow_path 是否要通过慢路径来分配内存
  */
 JEMALLOC_ALWAYS_INLINE void *
 iallocztm(tsdn_t *tsdn, size_t size, szind_t ind, bool zero, tcache_t *tcache,
@@ -105,6 +106,13 @@ ivsalloc(tsdn_t *tsdn, const void *ptr) {
 	return arena_vsalloc(tsdn, ptr);
 }
 
+
+/* 内存释放
+ * @param tsdn tsd句柄
+ * @param ptr 释放的内存的首地址
+ * @param tcache 缓存
+ * @param alloc_ctx 分配信息
+ */
 JEMALLOC_ALWAYS_INLINE void
 idalloctm(tsdn_t *tsdn, void *ptr, tcache_t *tcache, alloc_ctx_t *alloc_ctx,
     bool is_internal, bool slow_path) {

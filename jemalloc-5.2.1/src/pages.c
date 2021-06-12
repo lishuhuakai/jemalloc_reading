@@ -16,7 +16,7 @@
 #endif
 
 /******************************************************************************/
-/* ��һ��ֱ�ӺͲ���ϵͳ�򽻵� */
+/* 这一层直接和操作系统打交道 */
 /* Data. */
 
 /* Actual operating system page size, detected during bootstrap, <= PAGE. */
@@ -51,8 +51,8 @@ static void os_pages_unmap(void *addr, size_t size);
 
 /******************************************************************************/
 /*
- * @param addr ��ʼ��ַ
- * @param size ��ַ����
+ * @param addr 起始地址
+ * @param size 地址长度
  */
 static void *
 os_pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
@@ -179,10 +179,10 @@ pages_map_slow(size_t size, size_t alignment, bool *commit) {
 	return ret;
 }
 
-/* ����ɶ���д,˽������ӳ��
- * @param addr ��ʼ��ַ
- * @param size Ҫ������ڴ��Ĵ�С
- * @param alignment ����
+/* 分配可读可写,私有匿名映射
+ * @param addr 起始地址
+ * @param size 要分配的内存块的大小
+ * @param alignment 对齐
  */
 void *
 pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
@@ -246,6 +246,7 @@ pages_map(void *addr, size_t size, size_t alignment, bool *commit) {
 	return ret;
 }
 
+/* 取消映射 */
 void
 pages_unmap(void *addr, size_t size) {
 	assert(PAGE_ADDR2BASE(addr) == addr);
@@ -253,6 +254,7 @@ pages_unmap(void *addr, size_t size) {
 
 	os_pages_unmap(addr, size);
 }
+
 
 static bool
 pages_commit_impl(void *addr, size_t size, bool commit) {
@@ -268,6 +270,7 @@ pages_commit_impl(void *addr, size_t size, bool commit) {
 	    PAGE_READWRITE)) : (!VirtualFree(addr, size, MEM_DECOMMIT)));
 #else
 	{
+	    /* 关于PAGES_PROT_DECOMMIT,也就是使得这一片虚拟内存无法被访问 */
 		int prot = commit ? PAGES_PROT_COMMIT : PAGES_PROT_DECOMMIT;
 		void *result = mmap(addr, size, prot, mmap_flags | MAP_FIXED,
 		    -1, 0);
@@ -332,9 +335,9 @@ pages_purge_lazy(void *addr, size_t size) {
 #endif
 }
 
-/* �ڴ��ͷ�
- * @param addr ��ʼ��ַ
- * @param size �ڴ���С
+/* 内存释放
+ * @param addr 起始地址
+ * @param size 内存块大小
  */
 bool
 pages_purge_forced(void *addr, size_t size) {
@@ -425,7 +428,7 @@ pages_dodump(void *addr, size_t size) {
 #endif
 }
 
-/* 获取页的大小,linux下一般是4k */
+/* 获取页的大小 */
 static size_t
 os_page_detect(void) {
 #ifdef _WIN32
@@ -572,12 +575,12 @@ init_thp_state(void) {
 	static const char sys_state_always[] = "[always] madvise never\n";
 	static const char sys_state_never[] = "always madvise [never]\n";
 	char buf[sizeof(sys_state_madvise)];
-    /* 透明大页 */
+    /* 閫忔槑澶ч〉 */
 #if defined(JEMALLOC_USE_SYSCALL) && defined(SYS_open)
 	int fd = (int)syscall(SYS_open,
 	    "/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY);
 #else
-	int fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY); /* 打开文件 */
+	int fd = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY); /* 鎵撳紑鏂囦欢 */
 #endif
 	if (fd == -1) {
 		goto label_error;

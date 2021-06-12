@@ -70,6 +70,7 @@ arena_ichoose(tsd_t *tsd, arena_t *arena) {
 	return arena_choose_impl(tsd, arena, true);
 }
 
+/* 目前只有arena的标志为0,才是auto类型的 */
 static inline bool
 arena_is_auto(arena_t *arena) {
 	assert(narenas_auto > 0);

@@ -193,6 +193,7 @@ extent_alloc(tsdn_t *tsdn, arena_t *arena) {
 	return extent;
 }
 
+/* 回收extent这个结构 */
 void
 extent_dalloc(tsdn_t *tsdn, arena_t *arena, extent_t *extent) {
 	malloc_mutex_lock(tsdn, &arena->extent_avail_mtx);
@@ -303,6 +304,9 @@ extents_init(tsdn_t *tsdn, extents_t *extents, extent_state_t state,
 	return false;
 }
 
+/* 获取extents的状态
+ * 或者说extents的类型,active -> dirty -> muzzy -> retained
+ */
 extent_state_t
 extents_state_get(const extents_t *extents) {
 	return extents->state;
@@ -408,6 +412,7 @@ extents_remove_locked(tsdn_t *tsdn, extents_t *extents, extent_t *extent) {
 static extent_t *
 extents_fit_alignment(extents_t *extents, size_t min_size, size_t max_size,
     size_t alignment) {
+        /* 只能分配index为pind到pind_max的extent */
         pszind_t pind = sz_psz2ind(extent_size_quantize_ceil(min_size));
         pszind_t pind_max = sz_psz2ind(extent_size_quantize_ceil(max_size));
 
@@ -492,6 +497,7 @@ extents_first_fit_locked(tsdn_t *tsdn, arena_t *arena, extents_t *extents,
  * Do first-fit extent selection, where the selection policy choice is
  * based on extents->delay_coalesce.
  */
+/* 做first-fit匹配 */
 static extent_t *
 extents_fit_locked(tsdn_t *tsdn, arena_t *arena, extents_t *extents,
     size_t esize, size_t alignment) {
@@ -538,7 +544,7 @@ extent_try_delayed_coalesce(tsdn_t *tsdn, arena_t *arena,
 }
 
 /* 分配extent
- *
+ * @param extents extent构成的链表
  */
 extent_t *
 extents_alloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
@@ -555,7 +561,7 @@ extents_alloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	return extent;
 }
 
-/* extent回收
+/* extent回收到extents之中
  * @param tsdn tsd句柄
  * @param arena
  */
@@ -574,6 +580,8 @@ extents_dalloc(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	extent_record(tsdn, arena, r_extent_hooks, extents, extent, false);
 }
 
+/* 从extens链表中不停获取满足条件的extent
+ */
 extent_t *
 extents_evict(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
     extents_t *extents, size_t npages_min) {
@@ -832,6 +840,7 @@ extent_register_no_gdump_add(tsdn_t *tsdn, extent_t *extent) {
 	return extent_register_impl(tsdn, extent, false);
 }
 
+/* 重新建立tsdn与extent的联系 */
 static void
 extent_reregister(tsdn_t *tsdn, extent_t *extent) {
 	bool err = extent_register(tsdn, extent);
@@ -885,6 +894,7 @@ extent_deregister_impl(tsdn_t *tsdn, extent_t *extent, bool gdump) {
 	}
 }
 
+/* 断开extent和tsdn的联系 */
 static void
 extent_deregister(tsdn_t *tsdn, extent_t *extent) {
 	extent_deregister_impl(tsdn, extent, true);
@@ -898,6 +908,10 @@ extent_deregister_no_gdump_sub(tsdn_t *tsdn, extent_t *extent) {
 /*
  * Tries to find and remove an extent from extents that can be used for the
  * given allocation request.
+ */
+/* 尝试从extents中移除extent,此extent满足给定的分配请求
+ * @param new_addr 指定内存块首地址
+ * @param size 内存块大小
  */
 static extent_t *
 extent_recycle_extract(tsdn_t *tsdn, arena_t *arena,
@@ -924,7 +938,7 @@ extent_recycle_extract(tsdn_t *tsdn, arena_t *arena,
 		assert(alignment <= PAGE);
 	}
 
-	size_t esize = size + pad;
+	size_t esize = size + pad; /* 大小 */
 	malloc_mutex_lock(tsdn, &extents->mtx);
 	extent_hooks_assure_initialized(arena, r_extent_hooks);
 	extent_t *extent;
@@ -1136,6 +1150,7 @@ extent_need_manual_zero(arena_t *arena) {
  * in the given extents_t.
  */
 /* 尝试复用extent
+ * @param extents 可以从这个链表上查找extent来进行复用
  */
 static extent_t *
 extent_recycle(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
@@ -1506,12 +1521,15 @@ extent_alloc_retained(tsdn_t *tsdn, arena_t *arena,
 	return extent;
 }
 
+/* 实际进行内存分配
+ *
+ */
 static extent_t *
 extent_alloc_wrapper_hard(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, void *new_addr, size_t size, size_t pad,
     size_t alignment, bool slab, szind_t szind, bool *zero, bool *commit) {
 	size_t esize = size + pad;
-	extent_t *extent = extent_alloc(tsdn, arena);
+	extent_t *extent = extent_alloc(tsdn, arena); /* 这里分配元数据 */
 	if (extent == NULL) {
 		return NULL;
 	}
@@ -1520,7 +1538,7 @@ extent_alloc_wrapper_hard(tsdn_t *tsdn, arena_t *arena,
 	if (*r_extent_hooks == &extent_hooks_default) {
 		/* Call directly to propagate tsdn. */
 		addr = extent_alloc_default_impl(tsdn, arena, new_addr, esize,
-		    palignment, zero, commit);
+		    palignment, zero, commit); /* 分配虚拟内存 */
 	} else {
 		extent_hook_pre_reentrancy(tsdn, arena);
 		addr = (*r_extent_hooks)->alloc(*r_extent_hooks, new_addr,
@@ -1544,6 +1562,7 @@ extent_alloc_wrapper_hard(tsdn_t *tsdn, arena_t *arena,
 
 	return extent;
 }
+
 
 extent_t *
 extent_alloc_wrapper(tsdn_t *tsdn, arena_t *arena,
@@ -1574,28 +1593,36 @@ extent_alloc_wrapper(tsdn_t *tsdn, arena_t *arena,
 	return extent;
 }
 
-/* 判断两个extent是否可以合并 */
+/* 判断两个extent是否可以合并
+ * @param arena 第一个extnet所属的arena
+ * @param inner 第一个extent
+ * @param outer 第二个extent
+ */
 static bool
 extent_can_coalesce(arena_t *arena, extents_t *extents, const extent_t *inner,
     const extent_t *outer) {
 	assert(extent_arena_get(inner) == arena);
-	if (extent_arena_get(outer) != arena) {
+	if (extent_arena_get(outer) != arena) { /* extent属于不同arena,不能进行合并 */
 		return false;
 	}
 
 	assert(extent_state_get(inner) == extent_state_active);
-	if (extent_state_get(outer) != extents->state) {
+	if (extent_state_get(outer) != extents->state) { /* 两个extent位于不同的extents heap,不能合并 */
 		return false;
 	}
 
-	if (extent_committed_get(inner) != extent_committed_get(outer)) {
+	if (extent_committed_get(inner) != extent_committed_get(outer)) { /* commit状态不一致,不能合并 */
 		return false;
 	}
 
 	return true;
 }
 
-/* extent聚集 */
+/* extent合并
+ * @param inner 第一个extent
+ * @param outer 第二个extent
+ * @param forward 顺序, forward为true,表示inner -> outer,否则 outer -> inner
+ */
 static bool
 extent_coalesce(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
     extents_t *extents, extent_t *inner, extent_t *outer, bool forward,
@@ -1616,6 +1643,9 @@ extent_coalesce(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	return err;
 }
 
+/*
+ * @param extent 尝试合并的extent
+ */
 static extent_t *
 extent_try_coalesce_impl(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, rtree_ctx_t *rtree_ctx, extents_t *extents,
@@ -1635,6 +1665,7 @@ extent_try_coalesce_impl(tsdn_t *tsdn, arena_t *arena,
 		again = false;
 
 		/* Try to coalesce forward. */
+        /* 获取下一个extent */
 		extent_t *next = extent_lock_from_addr(tsdn, rtree_ctx,
 		    extent_past_get(extent), inactive_only);
 		if (next != NULL) {
@@ -1696,6 +1727,9 @@ extent_try_coalesce(tsdn_t *tsdn, arena_t *arena,
 	    extents, extent, coalesced, growing_retained, false);
 }
 
+/* 尝试合并extent
+ * @param rtree_ctx 用于快速索引extent
+ */
 static extent_t *
 extent_try_coalesce_large(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, rtree_ctx_t *rtree_ctx, extents_t *extents,
@@ -1731,11 +1765,13 @@ extent_record(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 	    (uintptr_t)extent_base_get(extent), true) == extent);
 
 	if (!extents->delay_coalesce) {
+
 		extent = extent_try_coalesce(tsdn, arena, r_extent_hooks,
 		    rtree_ctx, extents, extent, NULL, growing_retained);
 	} else if (extent_size_get(extent) >= SC_LARGE_MINCLASS) {
 		assert(extents == &arena->extents_dirty);
 		/* Always coalesce large extents eagerly. */
+        /* extent合并 */
 		bool coalesced;
 		do {
 			assert(extent_state_get(extent) == extent_state_active);
@@ -1746,6 +1782,7 @@ extent_record(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
 		if (extent_size_get(extent) >= oversize_threshold) {
 			/* Shortcut to purge the oversize extent eagerly. */
 			malloc_mutex_unlock(tsdn, &extents->mtx);
+            /* 如果太大,就直接进行回收 */
 			arena_decay_extent(tsdn, arena, r_extent_hooks, extent);
 			return;
 		}
@@ -1769,6 +1806,7 @@ extent_dalloc_gap(tsdn_t *tsdn, arena_t *arena, extent_t *extent) {
 	extent_dalloc_wrapper(tsdn, arena, &extent_hooks, extent);
 }
 
+/* 是否能回收未使用的虚拟内存 */
 static bool
 extent_may_dalloc(void) {
 	/* With retain enabled, the default dalloc always fails. */
@@ -1789,6 +1827,7 @@ extent_dalloc_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
 	return extent_dalloc_default_impl(addr, size);
 }
 
+/* 尝试回收extent对应的内存 */
 static bool
 extent_dalloc_wrapper_try(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent) {
@@ -1805,6 +1844,7 @@ extent_dalloc_wrapper_try(tsdn_t *tsdn, arena_t *arena,
 	/* Try to deallocate. */
 	if (*r_extent_hooks == &extent_hooks_default) {
 		/* Call directly to propagate tsdn. */
+        /* 内存回收 */
 		err = extent_dalloc_default_impl(extent_base_get(extent),
 		    extent_size_get(extent));
 	} else {
@@ -1817,12 +1857,16 @@ extent_dalloc_wrapper_try(tsdn_t *tsdn, arena_t *arena,
 	}
 
 	if (!err) {
+        /* extent这个结构还是要复用的. */
 		extent_dalloc(tsdn, arena, extent);
 	}
 
 	return err;
 }
 
+/*
+ * @param extent
+ */
 void
 extent_dalloc_wrapper(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent) {
@@ -1831,7 +1875,8 @@ extent_dalloc_wrapper(tsdn_t *tsdn, arena_t *arena,
 	    WITNESS_RANK_CORE, 0);
 
 	/* Avoid calling the default extent_dalloc unless have to. */
-	if (*r_extent_hooks != &extent_hooks_default || extent_may_dalloc()) {
+	if (*r_extent_hooks != &extent_hooks_default ||
+        extent_may_dalloc()) {
 		/*
 		 * Deregister first to avoid a race with other allocating
 		 * threads, and reregister if deallocation fails.
@@ -1843,7 +1888,7 @@ extent_dalloc_wrapper(tsdn_t *tsdn, arena_t *arena,
 		}
 		extent_reregister(tsdn, extent);
 	}
-
+    /* 下面只是解除映射关系而已,并不回收内存 */
 	if (*r_extent_hooks != &extent_hooks_default) {
 		extent_hook_pre_reentrancy(tsdn, arena);
 	}
@@ -1876,7 +1921,7 @@ extent_dalloc_wrapper(tsdn_t *tsdn, arena_t *arena,
 	if (config_prof) {
 		extent_gdump_sub(tsdn, extent);
 	}
-
+    /* 将extent放入extents_retained链表 */
 	extent_record(tsdn, arena, r_extent_hooks, &arena->extents_retained,
 	    extent, false);
 }
@@ -1888,6 +1933,7 @@ extent_destroy_default_impl(void *addr, size_t size) {
 	}
 }
 
+/* 销毁掉extent */
 static void
 extent_destroy_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
     bool committed, unsigned arena_ind) {
@@ -1960,6 +2006,7 @@ extent_commit_wrapper(tsdn_t *tsdn, arena_t *arena,
 	    length, false);
 }
 
+/* 其实执行的就是unmap操作 */
 static bool
 extent_decommit_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
     size_t offset, size_t length, unsigned arena_ind) {
@@ -1967,6 +2014,14 @@ extent_decommit_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
 	    length);
 }
 
+/* 执行extent的decommit操作,所谓decommit,一种实现是将对应的内存区域标记为不可访问
+ * 但是并不回收虚拟内存
+ * @param arena extent依附的arena
+ * @param extent
+ * @param offset 偏移量
+ * @param length 长度
+ * @return 如果执行成功,返回true,否则返回false
+ */
 bool
 extent_decommit_wrapper(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent, size_t offset,
@@ -1979,6 +2034,7 @@ extent_decommit_wrapper(tsdn_t *tsdn, arena_t *arena,
 	if (*r_extent_hooks != &extent_hooks_default) {
 		extent_hook_pre_reentrancy(tsdn, arena);
 	}
+    /* 可以参照extent_decommit_default */
 	bool err = ((*r_extent_hooks)->decommit == NULL ||
 	    (*r_extent_hooks)->decommit(*r_extent_hooks,
 	    extent_base_get(extent), extent_size_get(extent), offset, length,
@@ -2004,6 +2060,7 @@ extent_purge_lazy_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
 }
 #endif
 
+/* 将 */
 static bool
 extent_purge_lazy_impl(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent, size_t offset,
@@ -2029,6 +2086,11 @@ extent_purge_lazy_impl(tsdn_t *tsdn, arena_t *arena,
 	return err;
 }
 
+/* 判断是否能够进行回收
+ * @param extent
+ * @param offset 偏移量
+ * @param length 长度
+ */
 bool
 extent_purge_lazy_wrapper(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *extent, size_t offset,
@@ -2256,6 +2318,9 @@ extent_merge_default(extent_hooks_t *extent_hooks, void *addr_a, size_t size_a,
 	return extent_merge_default_impl(addr_a, addr_b);
 }
 
+/* 将a与b两个extent进行合并
+ *
+ */
 static bool
 extent_merge_impl(tsdn_t *tsdn, arena_t *arena,
     extent_hooks_t **r_extent_hooks, extent_t *a, extent_t *b,
@@ -2313,13 +2378,13 @@ extent_merge_impl(tsdn_t *tsdn, arena_t *arena,
 	} else {
 		b_elm_b = b_elm_a;
 	}
-
+    /* 将a作为新的extent,b会被回收 */
 	extent_size_set(a, extent_size_get(a) + extent_size_get(b));
 	extent_szind_set(a, SC_NSIZES);
 	extent_sn_set(a, (extent_sn_get(a) < extent_sn_get(b)) ?
-	    extent_sn_get(a) : extent_sn_get(b));
+	    extent_sn_get(a) : extent_sn_get(b)); /* 取小的序列值 */
 	extent_zeroed_set(a, extent_zeroed_get(a) && extent_zeroed_get(b));
-
+    /* 更新rtree */
 	extent_rtree_write_acquired(tsdn, a_elm_a, b_elm_b, a, SC_NSIZES,
 	    false);
 
@@ -2336,9 +2401,10 @@ extent_merge_wrapper(tsdn_t *tsdn, arena_t *arena,
 	return extent_merge_impl(tsdn, arena, r_extent_hooks, a, b, false);
 }
 
+/* extent模块的初始化 */
 bool
 extent_boot(void) {
-	if (rtree_new(&extents_rtree, true)) {
+	if (rtree_new(&extents_rtree, true)) { /* 创建基数树,用于快速索引 */
 		return true;
 	}
 

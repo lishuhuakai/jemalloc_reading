@@ -20,6 +20,11 @@
  * is delta larger than the one before it (including the initial size class in a
  * group, which is delta larger than base, the largest size class in the
  * previous group).
+ * 我们可以将size classes分成组,同组里面的size classes被间隔,所以它们能够满足大小
+ * 为2^x的内存申请,x被称作这个group的base,这个group内的size classes可以满足(base, base * 2]
+ * 的分配请求,一共有SC_NGROUP个size classes,在每个group中,每一项等距,以满足base / SC_NGROUP的内存分配
+ * 我们将 base / SC_NGROUP成为组的delta, 在组内的每一个size class比前一个size class大delta
+ *
  * To make the math all work out nicely, we require that SC_NGROUP is a power of
  * two, and define it in terms of SC_LG_NGROUP. We'll often talk in terms of
  * lg_base and lg_delta. For each of these groups then, we have that
@@ -37,6 +42,13 @@
  *     which covers allocations in (base + (SC_NGROUP - 1) * delta, 2 * base].
  * (Note that currently SC_NGROUP is always 4, so the "..." is empty in
  * practice.)
+ * 为了使得一切工作得很好,我们要求SC_NGROUP是2的幂,我们将经常谈论lg_base, lg_delta
+ * lg_delta == lg_base - SC_LG_NGROUP
+ * 给定lg_base以及lg_delta,一个组内的size classes:
+ *    base + 1 * delta -> (base, base + 1 * delta]
+ *    base + 2 * delta -> (base + 1 * delta, base + 2 * delta]
+ *    ...
+ *
  * Note that the last size class in the group is the next power of two (after
  * base), so that we've set up the induction correctly for the next group's
  * selection of delta.
@@ -52,12 +64,20 @@
  * allocations (without wasting space unnecessarily), we introduce tiny size
  * classes; one per power of two, up until we hit the quantum size. There are
  * therefore LG_QUANTUM - SC_LG_TINY_MIN such size classes.
+ * 接下来,让我们考虑一下前几个size classes,我们需要考虑两个常量,LG_QUANTUM以及
+ * SC_LG_TINY_MIN, LG_QUANTUM确保正确的平台对齐,所有大小大于等于(1 << LG_QUANTUM)的
+ * 对象至少要保证(1 << LG_QUANTUM)对齐,对于小于1<<QUANTUM大小,我们可以放松一点(我们不支持类型对齐大于
+ *  其大小的平台),为了允许这样的分配(避免不必要的内存浪费),我们引入了tiny size classes.
+ * LG_QUANTUM - SC_LG_TINY_MIN 这样的等级
  *
  * Next, we have a size class of size (1 << LG_QUANTUM).  This can't be the
  * start of a group in the sense we described above (covering a power of two
  * range) since, if we divided into it to pick a value of delta, we'd get a
  * delta smaller than (1 << LG_QUANTUM) for sizes >= (1 << LG_QUANTUM), which
  * is against the rules.
+ * 我们有一个大小为(1<<LG_QUANTUM)的size calss,这不可能是在我们上面描述的意义上的组的开始,
+ * 因为如果我们将其划分为一个delta值,我们将得到这样一个delta,它小于1<<LG_QUANTUM,对于大小
+ * 大于等于(1<<LG_QUANTUM)的尺寸,它违反了规则
  *
  * The first base we can divide by SC_NGROUP while still being at least
  * (1 << LG_QUANTUM) is SC_NGROUP * (1 << LG_QUANTUM). We can get there by
@@ -68,6 +88,7 @@
  *   3 * (1 << LG_QUANTUM)
  *   ... (although, as above, this "..." is empty in practice)
  *   SC_NGROUP * (1 << LG_QUANTUM).
+ * 第一个base,我们可以除以SC_NGROUP,
  *
  * There are SC_NGROUP of these size classes, so we can regard it as a sort of
  * pseudo-group, even though it spans multiple powers of 2, is divided
@@ -79,6 +100,7 @@
  * lg_delta = lg_base - SC_LG_GROUP (== LG_QUANTUM).
  *
  * So, in order, the size classes are:
+ * 按照顺序,这些size classes如下:
  *
  * Tiny size classes:
  * - Count: LG_QUANTUM - SC_LG_TINY_MIN.
@@ -87,10 +109,10 @@
  *     1 << (SC_LG_TINY_MIN + 1)
  *     1 << (SC_LG_TINY_MIN + 2)
  *     ...
- *     1 << (LG_QUANTUM - 1)
+ *     1 << (LG_QUANTUM - 1)         # [SC_LG_TINY_MIN, LG_QUANTUM -1) 个size class
  *
  * Initial pseudo-group:
- * - Count: SC_NGROUP
+ * - Count: SC_NGROUP            # 个数为SC_NGROUP
  * - Sizes:
  *     1 * (1 << LG_QUANTUM)
  *     2 * (1 << LG_QUANTUM)
@@ -98,7 +120,7 @@
  *     ...
  *     SC_NGROUP * (1 << LG_QUANTUM)
  *
- * Regular group 0:
+ * Regular group 0:              # 平常的group 0
  * - Count: SC_NGROUP
  * - Sizes:
  *   (relative to lg_base of LG_QUANTUM + SC_LG_NGROUP and lg_delta of
@@ -142,10 +164,13 @@
  *
  * For regular groups (i.e. those with lg_base >= LG_QUANTUM + SC_LG_NGROUP),
  * lg_delta is lg_base - SC_LG_NGROUP, and ndelta goes from 1 to SC_NGROUP.
+ * 对于regular groups(也就是那些lg_base >= LG_QUANTUM + SC_LG_NGROUP的group)
+ * lg_delta为lg_base - SC_LG_NGROUP, ndelta从1到SC_NGROUP
  *
  * For the initial tiny size classes (if any), lg_base is lg(size class size).
  * lg_delta is lg_base for the first size class, and lg_base - 1 for all
  * subsequent ones. ndelta is always 0.
+ * 对于initial tiny size classes, lg_base为lg(size class size), lg_delta为
  *
  * For the pseudo-group, if there are no tiny size classes, then we set
  * lg_base == LG_QUANTUM, lg_delta == LG_QUANTUM, and have ndelta range from 0
@@ -169,6 +194,7 @@
  * Size class N + (1 << SC_LG_NGROUP) twice the size of size class N.
  */
 #define SC_LG_NGROUP 2
+/* SC_LG_TINY_MIN -- tiny group的最小值 */
 #define SC_LG_TINY_MIN 3
 
 #if SC_LG_TINY_MIN == 0
@@ -180,9 +206,13 @@
  * The definitions below are all determined by the above settings and system
  * characteristics.
  */
+/* 32位系统下, SC_NGROUP 1 << 2 = 2^2
+ * 我们假定LG_QUANTUM为4, SC_LG_TINY_MIN为3
+ *  ==> SC_LG_TINY_MAXCLASS(tiny group的最大值)为3
+ */
 #define SC_NGROUP (1ULL << SC_LG_NGROUP)
-#define SC_PTR_BITS ((1ULL << LG_SIZEOF_PTR) * 8)
-#define SC_NTINY (LG_QUANTUM - SC_LG_TINY_MIN)
+#define SC_PTR_BITS ((1ULL << LG_SIZEOF_PTR) * 8) /* 指针的bit位数 */
+#define SC_NTINY (LG_QUANTUM - SC_LG_TINY_MIN) /* tiny group的个数 */
 #define SC_LG_TINY_MAXCLASS (LG_QUANTUM > SC_LG_TINY_MIN ? LG_QUANTUM - 1 : -1)
 #define SC_NPSEUDO SC_NGROUP
 #define SC_LG_FIRST_REGULAR_BASE (LG_QUANTUM + SC_LG_NGROUP)
@@ -194,7 +224,7 @@
  */
 #define SC_LG_BASE_MAX (SC_PTR_BITS - 2)
 #define SC_NREGULAR (SC_NGROUP * 					\
-    (SC_LG_BASE_MAX - SC_LG_FIRST_REGULAR_BASE + 1) - 1)
+    (SC_LG_BASE_MAX - SC_LG_FIRST_REGULAR_BASE + 1) - 1) /* regular group的个数 */
 #define SC_NSIZES (SC_NTINY + SC_NPSEUDO + SC_NREGULAR)
 
 /* The number of size classes that are a multiple of the page size. */
@@ -243,6 +273,7 @@
 #endif
 
 /* The largest size class in the lookup table. */
+/* lookup table所支持的最大的size class */
 #define SC_LOOKUP_MAXCLASS ((size_t)1 << 12)
 
 /* Internal, only used for the definition of SC_SMALL_MAXCLASS. */
@@ -258,33 +289,40 @@
 #define SC_LG_LARGE_MINCLASS (LG_PAGE + SC_LG_NGROUP)
 
 /* Internal; only used for the definition of SC_LARGE_MAXCLASS. */
+/* 32位系统,SC_PTR_BITS为 (1 << 2) * 8 = 32
+ *  SC_MAX_BASE (1 << 30 = 2^(30))
+ *  SC_MAX_DELTA (1 << (32 - 2 - 2) == 2^(28))
+ */
 #define SC_MAX_BASE ((size_t)1 << (SC_PTR_BITS - 2))
 #define SC_MAX_DELTA ((size_t)1 << (SC_PTR_BITS - 2 - SC_LG_NGROUP))
 
 /* The largest size class supported. */
+/* 所支持的最大的size class
+ * 32位系统 2^(30) + 3 * 2^(28)
+ */
 #define SC_LARGE_MAXCLASS (SC_MAX_BASE + (SC_NGROUP - 1) * SC_MAX_DELTA)
 
 typedef struct sc_s sc_t;
 struct sc_s {
 	/* Size class index, or -1 if not a valid size class. */
-	int index;
+	int index; /* size class的index值 */
 	/* Lg group base size (no deltas added). */
-	int lg_base;
+	int lg_base; /*  */
 	/* Lg delta to previous size class. */
-	int lg_delta;
+	int lg_delta; /* 增量 */
 	/* Delta multiplier.  size == 1<<lg_base + ndelta<<lg_delta */
 	int ndelta;
 	/*
 	 * True if the size class is a multiple of the page size, false
 	 * otherwise.
 	 */
-	bool psz;
+	bool psz; /* 如果size class是page size的整数倍 */
 	/*
 	 * True if the size class is a small, bin, size class. False otherwise.
 	 */
 	bool bin;
 	/* The slab page count if a small bin size class, 0 otherwise. */
-	int pgs;
+	int pgs; /* 页的数量 */
 	/* Same as lg_delta if a lookup table size class, 0 otherwise. */
 	int lg_delta_lookup;
 };
@@ -292,7 +330,7 @@ struct sc_s {
 typedef struct sc_data_s sc_data_t;
 struct sc_data_s {
 	/* Number of tiny size classes. */
-	unsigned ntiny;
+	unsigned ntiny; /* tiny size classes的个数 */
 	/* Number of bins supported by the lookup table. */
 	int nlbins;
 	/* Number of small size class bins. */

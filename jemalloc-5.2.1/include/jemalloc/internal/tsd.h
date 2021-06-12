@@ -345,6 +345,7 @@ tsd_fast(tsd_t *tsd) {
 	return fast;
 }
 
+/* 获取每个线程私有的数据 */
 JEMALLOC_ALWAYS_INLINE tsd_t *
 tsd_fetch_impl(bool init, bool minimal) {
 	tsd_t *tsd = tsd_get(init);

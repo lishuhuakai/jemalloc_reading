@@ -20,10 +20,10 @@ extern bool opt_zero;
 extern unsigned opt_narenas;
 
 /* Number of CPUs. */
-extern unsigned ncpus;
+extern unsigned ncpus; /* cpu的个数 */
 
 /* Number of arenas used for automatic multiplexing of threads and arenas. */
-extern unsigned narenas_auto;
+extern unsigned narenas_auto; /* 用于线程和arenas的自动多路复用的arena个数 */
 
 /* Base index for manual arenas. */
 extern unsigned manual_arena_base;
@@ -32,7 +32,7 @@ extern unsigned manual_arena_base;
  * Arenas that are used to service external requests.  Not all elements of the
  * arenas array are necessarily used; arenas are created lazily as needed.
  */
-extern atomic_p_t arenas[];
+extern atomic_p_t arenas[]; /* arena指针构成的数组 */
 
 void *a0malloc(size_t size);
 void a0dalloc(void *ptr);

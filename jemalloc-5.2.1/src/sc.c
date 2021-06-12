@@ -21,13 +21,16 @@ reg_size_compute(int lg_base, int lg_delta, int ndelta) {
 }
 
 /* Returns the number of pages in the slab. */
+/* 返回slab中page的数目
+ * @param lg_base
+ */
 static int
 slab_size(int lg_page, int lg_base, int lg_delta, int ndelta) {
-	size_t page = (ZU(1) << lg_page);
+	size_t page = (ZU(1) << lg_page); /* 一页的大小 */
 	size_t reg_size = reg_size_compute(lg_base, lg_delta, ndelta);
 
 	size_t try_slab_size = page;
-	size_t try_nregs = try_slab_size / reg_size;
+	size_t try_nregs = try_slab_size / reg_size; /* 一页能分配多少个 */
 	size_t perfect_slab_size = 0;
 	bool perfect = false;
 	/*
@@ -43,9 +46,9 @@ slab_size(int lg_page, int lg_base, int lg_delta, int ndelta) {
 	while (!perfect) {
 		perfect_slab_size = try_slab_size;
 		size_t perfect_nregs = try_nregs;
-		try_slab_size += page;
+		try_slab_size += page; /* 增加1页 */
 		try_nregs = try_slab_size / reg_size;
-		if (perfect_slab_size == perfect_nregs * reg_size) {
+		if (perfect_slab_size == perfect_nregs * reg_size) { /* 保证能恰好完全分配(整除) */
 			perfect = true;
 		}
 	}
@@ -55,15 +58,21 @@ slab_size(int lg_page, int lg_base, int lg_delta, int ndelta) {
 static void
 size_class(
     /* Output. */
-    sc_t *sc,
+    sc_t *sc, /* 待初始化的结构 */
     /* Configuration decisions. */
-    int lg_max_lookup, int lg_page, int lg_ngroup,
+    int lg_max_lookup, /* 2^lg_max_lookup -- 大小小于这个值的分配请求,都可以快速索引到index */
+    int lg_page,    /* 2^lg_page为页的大小 */
+    int lg_ngroup, /* 2^lg_ngroup为组的个数 */
     /* Inputs specific to the size class. */
-    int index, int lg_base, int lg_delta, int ndelta) {
+    int index,    /* 此sc在sc数组中的下标 */
+    int lg_base,
+    int lg_delta,
+    int ndelta) {
 	sc->index = index;
 	sc->lg_base = lg_base;
-	sc->lg_delta = lg_delta;
-	sc->ndelta = ndelta;
+	sc->lg_delta = lg_delta; /* group内偏移量指数 */
+	sc->ndelta = ndelta;      /* group内偏移数 */
+    /* 判断是否为页大小的倍数 */
 	sc->psz = (reg_size_compute(lg_base, lg_delta, ndelta)
 	    % (ZU(1) << lg_page) == 0);
 	size_t size = (ZU(1) << lg_base) + (ZU(ndelta) << lg_delta);
@@ -87,14 +96,18 @@ size_class(
 static void
 size_classes(
     /* Output. */
-    sc_data_t *sc_data,
+    sc_data_t *sc_data, /* 初始化sc_data */
     /* Determined by the system. */
-    size_t lg_ptr_size, int lg_quantum,
+    size_t lg_ptr_size,  /* 2^lg_ptr_size 为指针大小 */
+    int lg_quantum,      /* 2^lg_quantum -- 一般平台要求的对齐字节数, 一般lg_quantum为4 */
     /* Configuration decisions. */
-    int lg_tiny_min, int lg_max_lookup, int lg_page, int lg_ngroup) {
+    int lg_tiny_min,   /* 2^lg_tiny_min -- 平台所支持的,最小的分配字节数 */
+    int lg_max_lookup, /* size小于2^lg_max_lookup的,都可以通过空间换时间的方式,获取到索引 */
+    int lg_page,        /* 2^lg_page为页大小 */
+    int lg_ngroup) {    /* 2^lg_ngroup为组的个数,一般lg_ngroup为2 */
 	int ptr_bits = (1 << lg_ptr_size) * 8;
-	int ngroup = (1 << lg_ngroup);
-	int ntiny = 0;
+	int ngroup = (1 << lg_ngroup); /* 组的个数 */
+	int ntiny = 0;  /* tiny size classes的个数 */
 	int nlbins = 0;
 	int lg_tiny_maxclass = (unsigned)-1;
 	int nbins = 0;
@@ -113,8 +126,12 @@ size_classes(
 	size_t large_maxclass = 0;
 
 	/* Tiny size classes. */
-	while (lg_base < lg_quantum) {
+	while (lg_base < lg_quantum) { /* 这里假定一下,lg_base为3, lg_quantum为4 */
 		sc_t *sc = &sc_data->sc[index];
+        /* 不停地初始化sc
+         * tiny class的ndelta始终为0
+         * lg_delta为3, lg_base为3
+         */
 		size_class(sc, lg_max_lookup, lg_page, lg_ngroup, index,
 		    lg_base, lg_delta, ndelta);
 		if (sc->lg_delta_lookup != 0) {
@@ -155,6 +172,8 @@ size_classes(
 			nbins++;
 		}
 	}
+
+
 	while (ndelta < ngroup) {
 		sc_t *sc = &sc_data->sc[index];
 		size_class(sc, lg_max_lookup, lg_page, lg_ngroup, index,
@@ -170,6 +189,7 @@ size_classes(
 	}
 
 	/* All remaining groups. */
+    /* 全部剩余的group */
 	lg_base = lg_base + lg_ngroup;
 	while (lg_base < ptr_bits - 1) {
 		ndelta = 1;
@@ -208,7 +228,7 @@ size_classes(
 			index++;
 			ndelta++;
 		}
-		lg_base++;
+		lg_base++; /* 这里每一次只是增加1 */
 		lg_delta++;
 	}
 	/* Additional outputs. */
@@ -245,7 +265,7 @@ size_classes(
 	assert(sc_data->lg_large_minclass == SC_LG_LARGE_MINCLASS);
 	assert(sc_data->large_maxclass == SC_LARGE_MAXCLASS);
 
-	/* 
+	/*
 	 * In the allocation fastpath, we want to assume that we can
 	 * unconditionally subtract the requested allocation size from
 	 * a ssize_t, and detect passing through 0 correctly.  This
@@ -254,7 +274,8 @@ size_classes(
 	 */
 	assert(SC_LARGE_MAXCLASS < SSIZE_MAX);
 }
-
+/* size class相关数据的初始化
+ */
 void
 sc_data_init(sc_data_t *sc_data) {
 	assert(!sc_data->initialized);

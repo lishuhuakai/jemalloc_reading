@@ -38,13 +38,13 @@ typedef struct bin_info_s bin_info_t;
 /* bin描述信息 */
 struct bin_info_s {
 	/* Size of regions in a slab for this bin's size class. */
-	size_t			reg_size;
+	size_t			reg_size;  /* 每个region的大小 */
 
 	/* Total size of a slab for this bin's size class. */
-	size_t			slab_size;
+	size_t			slab_size; /* size class的完整大小 */
 
 	/* Total number of regions in a slab for this bin's size class. */
-	uint32_t		nregs;
+	uint32_t		nregs; /* region的个数 */
 
 	/* Number of sharded bins in each arena for this size class. */
 	uint32_t		n_shards;

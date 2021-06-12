@@ -109,6 +109,7 @@ arena_prof_alloc_time_set(tsdn_t *tsdn, const void *ptr, alloc_ctx_t *alloc_ctx,
 	large_prof_alloc_time_set(extent, t);
 }
 
+/*  */
 JEMALLOC_ALWAYS_INLINE void
 arena_decay_ticks(tsdn_t *tsdn, arena_t *arena, unsigned nticks) {
 	tsd_t *tsd;
@@ -117,7 +118,7 @@ arena_decay_ticks(tsdn_t *tsdn, arena_t *arena, unsigned nticks) {
 	if (unlikely(tsdn_null(tsdn))) {
 		return;
 	}
-	tsd = tsdn_tsd(tsdn);
+	tsd = tsdn_tsd(tsdn); /* 获取句柄 */
 	decay_ticker = decay_ticker_get(tsd, arena_ind_get(arena));
 	if (unlikely(decay_ticker == NULL)) {
 		return;
@@ -158,6 +159,7 @@ arena_decay_extent(tsdn_t *tsdn,arena_t *arena, extent_hooks_t **r_extent_hooks,
 /* 从arena中分配内存
  * @param tcache 线程内存缓存池指针,主要为了避免加锁
  * @param size 内存块大小
+ * @param ind 大小级别
  */
 JEMALLOC_ALWAYS_INLINE void *
 arena_malloc(tsdn_t *tsdn, arena_t *arena, size_t size, szind_t ind, bool zero,
@@ -165,10 +167,12 @@ arena_malloc(tsdn_t *tsdn, arena_t *arena, size_t size, szind_t ind, bool zero,
 	assert(!tsdn_null(tsdn) || tcache == NULL);
 
 	if (likely(tcache != NULL)) {
+        /* 小内存分配 */
 		if (likely(size <= SC_SMALL_MAXCLASS)) {
 			return tcache_alloc_small(tsdn_tsd(tsdn), arena,
 			    tcache, size, ind, zero, slow_path);
 		}
+        /* 大内存分配 */
 		if (likely(size <= tcache_maxclass)) {
 			return tcache_alloc_large(tsdn_tsd(tsdn), arena,
 			    tcache, size, ind, zero, slow_path);
@@ -232,6 +236,7 @@ arena_vsalloc(tsdn_t *tsdn, const void *ptr) {
 	return sz_index2size(szind);
 }
 
+/* 将大内存释放到tcache中 */
 static inline void
 arena_dalloc_large_no_tcache(tsdn_t *tsdn, void *ptr, szind_t szind) {
 	if (config_prof && unlikely(szind < SC_NBINS)) {
@@ -242,6 +247,9 @@ arena_dalloc_large_no_tcache(tsdn_t *tsdn, void *ptr, szind_t szind) {
 	}
 }
 
+/* 在没有缓存的情况下,会走此函数进行内存释放
+ * @param ptr 要释放的内存的首地址
+ */
 static inline void
 arena_dalloc_no_tcache(tsdn_t *tsdn, void *ptr) {
 	assert(ptr != NULL);
@@ -250,7 +258,7 @@ arena_dalloc_no_tcache(tsdn_t *tsdn, void *ptr) {
 	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
 
 	szind_t szind;
-	bool slab;
+	bool slab; /* 如果是slab,那么就表示是小内存 */
 	rtree_szind_slab_read(tsdn, &extents_rtree, rtree_ctx, (uintptr_t)ptr,
 	    true, &szind, &slab);
 
@@ -263,6 +271,7 @@ arena_dalloc_no_tcache(tsdn_t *tsdn, void *ptr) {
 	}
 
 	if (likely(slab)) {
+        /* 释放小内存 */
 		/* Small allocation. */
 		arena_dalloc_small(tsdn, ptr);
 	} else {
@@ -270,6 +279,10 @@ arena_dalloc_no_tcache(tsdn_t *tsdn, void *ptr) {
 	}
 }
 
+/* 大内存释放
+ * @param ptr 待释放内存的首地址
+ * @param szind 大小等级
+ */
 JEMALLOC_ALWAYS_INLINE void
 arena_dalloc_large(tsdn_t *tsdn, void *ptr, tcache_t *tcache, szind_t szind,
     bool slow_path) {
@@ -286,6 +299,12 @@ arena_dalloc_large(tsdn_t *tsdn, void *ptr, tcache_t *tcache, szind_t szind,
 	}
 }
 
+/* 释放内存
+ * @parma tsdn
+ * @param ptr 释放的内存的首地址
+ * @param tcache 线程内存缓存池
+ * @param alloc_ctx 分配信息
+ */
 JEMALLOC_ALWAYS_INLINE void
 arena_dalloc(tsdn_t *tsdn, void *ptr, tcache_t *tcache,
     alloc_ctx_t *alloc_ctx, bool slow_path) {
@@ -319,11 +338,11 @@ arena_dalloc(tsdn_t *tsdn, void *ptr, tcache_t *tcache,
 		assert(slab == extent_slab_get(extent));
 	}
 
-	if (likely(slab)) {
+	if (likely(slab)) { /* 小内存释放 */
 		/* Small allocation. */
 		tcache_dalloc_small(tsdn_tsd(tsdn), tcache, ptr, szind,
 		    slow_path);
-	} else {
+	} else { /* 大内存释放 */
 		arena_dalloc_large(tsdn, ptr, tcache, szind, slow_path);
 	}
 }

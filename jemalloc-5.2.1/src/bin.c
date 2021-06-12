@@ -8,20 +8,24 @@
 
 bin_info_t bin_infos[SC_NBINS];
 
+/* 初始化bin_infos数组
+ *
+ */
 static void
 bin_infos_init(sc_data_t *sc_data, unsigned bin_shard_sizes[SC_NBINS],
     bin_info_t bin_infos[SC_NBINS]) {
+    /* 前SC_NBINS个 */
 	for (unsigned i = 0; i < SC_NBINS; i++) {
 		bin_info_t *bin_info = &bin_infos[i];
 		sc_t *sc = &sc_data->sc[i];
 		bin_info->reg_size = ((size_t)1U << sc->lg_base)
 		    + ((size_t)sc->ndelta << sc->lg_delta);
-		bin_info->slab_size = (sc->pgs << LG_PAGE);
+		bin_info->slab_size = (sc->pgs << LG_PAGE); /* 总大小 */
 		bin_info->nregs =
-		    (uint32_t)(bin_info->slab_size / bin_info->reg_size);
+		    (uint32_t)(bin_info->slab_size / bin_info->reg_size); /* region的个数 */
 		bin_info->n_shards = bin_shard_sizes[i];
 		bitmap_info_t bitmap_info = BITMAP_INFO_INITIALIZER(
-		    bin_info->nregs);
+		    bin_info->nregs); /* 分配位图信息 */
 		bin_info->bitmap_info = bitmap_info;
 	}
 }

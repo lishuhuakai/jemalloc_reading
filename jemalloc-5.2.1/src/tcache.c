@@ -11,6 +11,13 @@
 /* Data. */
 
 bool	opt_tcache = true;
+/*
+ * Maximum size	class (log base	2) to cache in the thread-specific
+ * cache (tcache). At a	minimum, all small size	classes	are cached,
+ * and at a maximum all	large size classes are cached. The default
+ * maximum is 32 KiB (2^15).
+ * tcache中缓存的内存块的最大级别
+ */
 ssize_t	opt_lg_tcache_max = LG_TCACHE_MAXCLASS_DEFAULT;
 
 cache_bin_info_t	*tcache_bin_info;
@@ -37,6 +44,9 @@ tcache_salloc(tsdn_t *tsdn, const void *ptr) {
 	return arena_salloc(tsdn, ptr);
 }
 
+/* 垃圾回收
+ *
+ */
 void
 tcache_event_hard(tsd_t *tsd, tcache_t *tcache) {
 	szind_t binind = tcache->next_gc_bin;
@@ -86,7 +96,8 @@ tcache_event_hard(tsd_t *tsd, tcache_t *tcache) {
 }
 
 /* 内存分配
- *
+ * @param tcache 线程内存缓存池
+ * @param tbin
  */
 void *
 tcache_alloc_small_hard(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,
@@ -133,6 +144,10 @@ tbin_extents_lookup_size_check(tsdn_t *tsdn, cache_bin_t *tbin, szind_t binind,
 	}
 }
 
+/*
+ * @param tbin 需要执行flush操作的bin
+ * @param rem 需要保留的object的个数
+ */
 void
 tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
     szind_t binind, unsigned rem) {
@@ -153,7 +168,7 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
 	} else {
 		for (unsigned i = 0 ; i < nflush; i++) {
 			item_extent[i] = iealloc(tsd_tsdn(tsd),
-			    *(tbin->avail - 1 - i));
+			    *(tbin->avail - 1 - i)); /* 根据ptr获得对应的extent */
 		}
 	}
 	while (nflush > 0) {
@@ -189,6 +204,7 @@ tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin,
 
 			if (extent_arena_ind_get(extent) == bin_arena_ind
 			    && extent_binshard_get(extent) == binshard) {
+			    /* 进行内存回收工作 */
 				arena_dalloc_bin_junked_locked(tsd_tsdn(tsd),
 				    bin_arena, bin, binind, extent, ptr);
 			} else {
@@ -740,6 +756,7 @@ tcaches_destroy(tsd_t *tsd, unsigned ind) {
 	}
 }
 
+/* tcache模块的初始化 */
 bool
 tcache_boot(tsdn_t *tsdn) {
 	/* If necessary, clamp opt_lg_tcache_max. */
@@ -755,9 +772,10 @@ tcache_boot(tsdn_t *tsdn) {
 		return true;
 	}
 
-	nhbins = sz_size2index(tcache_maxclass) + 1;
+	nhbins = sz_size2index(tcache_maxclass) + 1; /* 每一个级别分配一个空间 */
 
 	/* Initialize tcache_bin_info. */
+    /* 分配数组,用于描述tcache的bin */
 	tcache_bin_info = (cache_bin_info_t *)base_alloc(tsdn, b0get(), nhbins
 	    * sizeof(cache_bin_info_t), CACHELINE);
 	if (tcache_bin_info == NULL) {
@@ -765,10 +783,11 @@ tcache_boot(tsdn_t *tsdn) {
 	}
 	stack_nelms = 0;
 	unsigned i;
+    /* 计算每个bin缓存的上限 */
 	for (i = 0; i < SC_NBINS; i++) {
 		if ((bin_infos[i].nregs << 1) <= TCACHE_NSLOTS_SMALL_MIN) {
 			tcache_bin_info[i].ncached_max =
-			    TCACHE_NSLOTS_SMALL_MIN;
+			    TCACHE_NSLOTS_SMALL_MIN; /* 缓存20个? */
 		} else if ((bin_infos[i].nregs << 1) <=
 		    TCACHE_NSLOTS_SMALL_MAX) {
 			tcache_bin_info[i].ncached_max =
@@ -780,7 +799,7 @@ tcache_boot(tsdn_t *tsdn) {
 		stack_nelms += tcache_bin_info[i].ncached_max;
 	}
 	for (; i < nhbins; i++) {
-		tcache_bin_info[i].ncached_max = TCACHE_NSLOTS_LARGE;
+		tcache_bin_info[i].ncached_max = TCACHE_NSLOTS_LARGE; /* 其余最多也是20个 */
 		stack_nelms += tcache_bin_info[i].ncached_max;
 	}
 

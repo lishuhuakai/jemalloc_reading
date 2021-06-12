@@ -8,10 +8,10 @@
 /* Embedded at the beginning of every block of base-managed virtual memory. */
 struct base_block_s {
 	/* Total size of block's virtual memory mapping. */
-	size_t		size; /* ĞéÄâÄÚ´æÓ³Éä¿éµÄ´óĞ¡ */
+	size_t		size; /* è™šæ‹Ÿå†…å­˜æ˜ å°„å—çš„å¤§å° */
 
 	/* Next block in list of base's blocks. */
-	base_block_t	*next; /* ÏÂÒ»¸öblock */
+	base_block_t	*next;  /* ä¸‹ä¸€ä¸ªblock */
 
 	/* Tracks unused trailing space. */
 	extent_t	extent;
@@ -19,7 +19,7 @@ struct base_block_s {
 
 struct base_s {
 	/* Associated arena's index within the arenas array. */
-	unsigned	ind;
+	unsigned	ind;  /* æ­¤ç»“æ„å…³è”çš„arenaåœ¨arenasæ•°ç»„ä¸­çš„ä¸‹æ ‡ */
 
 	/*
 	 * User-configurable extent hook functions.  Points to an
@@ -49,7 +49,7 @@ struct base_s {
 	extent_heap_t	avail[SC_NSIZES];
 
 	/* Stats, only maintained if config_stats. */
-	size_t		allocated; /* ÒÑ¾­·ÖÅä³öÈ¥µÄÄÚ´æ´óĞ¡ */
+	size_t		allocated;  /* å·²ç»åˆ†é…å‡ºå»çš„å†…å­˜å¤§å° */
 	size_t		resident;
 	size_t		mapped;
 	/* Number of THP regions touched. */

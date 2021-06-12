@@ -1,6 +1,7 @@
 #ifndef JEMALLOC_INTERNAL_ARENA_INLINES_A_H
 #define JEMALLOC_INTERNAL_ARENA_INLINES_A_H
 
+/* 获取arena的标志,具体可以参照arena_init函数 */
 static inline unsigned
 arena_ind_get(const arena_t *arena) {
 	return base_ind_get(arena->base);

@@ -173,7 +173,7 @@ hook_invoke_dalloc(hook_dalloc_t type, void *address, uintptr_t args_raw[3]) {
 	FOR_EACH_HOOK_BEGIN(&hook)
 		hook_dalloc h = hook.hooks.dalloc_hook;
 		if (h != NULL) {
-			h(hook.hooks.extra, type, address, args_raw);
+			h(hook.hooks.extra, type, address, args_raw); /* 调用回调函数来回收内存 */
 		}
 	FOR_EACH_HOOK_END
 	HOOK_EPILOGUE

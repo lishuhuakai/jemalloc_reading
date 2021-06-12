@@ -3116,6 +3116,7 @@ label_return:
 	return ret;
 }
 
+
 static int
 experimental_hooks_install_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
     void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
@@ -3131,6 +3132,7 @@ experimental_hooks_install_ctl(tsd_t *tsd, const size_t *mib, size_t miblen,
 	 * this API, which can change at a moment's notice.
 	 */
 	hooks_t hooks;
+    /* 这里的newp实际类就是hooks_t */
 	WRITE(hooks, hooks_t);
 	void *handle = hook_install(tsd_tsdn(tsd), &hooks);
 	if (handle == NULL) {

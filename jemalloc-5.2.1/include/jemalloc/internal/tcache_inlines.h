@@ -27,6 +27,7 @@ tcache_enabled_set(tsd_t *tsd, bool enabled) {
 	tsd_slow_update(tsd);
 }
 
+/* 让gc_ticker减小,触发垃圾回收 */
 JEMALLOC_ALWAYS_INLINE void
 tcache_event(tsd_t *tsd, tcache_t *tcache) {
 	if (TCACHE_GC_INCR == 0) {
@@ -61,7 +62,7 @@ tcache_alloc_small(tsd_t *tsd, arena_t *arena, tcache_t *tcache,
 		if (unlikely(arena == NULL)) {
 			return NULL;
 		}
-
+        /* 如果分配失败,需要重新分配 */
 		ret = tcache_alloc_small_hard(tsd_tsdn(tsd), arena, tcache,
 		    bin, binind, &tcache_hard_success);
 		if (tcache_hard_success == false) {
@@ -105,6 +106,9 @@ tcache_alloc_small(tsd_t *tsd, arena_t *arena, tcache_t *tcache,
 	return ret;
 }
 
+/* 通过tcache来分配大内存
+ * @param size 待分配的内存大小
+ */
 JEMALLOC_ALWAYS_INLINE void *
 tcache_alloc_large(tsd_t *tsd, arena_t *arena, tcache_t *tcache, size_t size,
     szind_t binind, bool zero, bool slow_path) {
@@ -113,7 +117,7 @@ tcache_alloc_large(tsd_t *tsd, arena_t *arena, tcache_t *tcache, size_t size,
 	bool tcache_success;
 
 	assert(binind >= SC_NBINS &&binind < nhbins);
-	bin = tcache_large_bin_get(tcache, binind);
+	bin = tcache_large_bin_get(tcache, binind); /* 获取对应的bin */
 	ret = cache_bin_alloc_easy(bin, &tcache_success);
 	assert(tcache_success == (ret != NULL));
 	if (unlikely(!tcache_success)) {
@@ -177,10 +181,11 @@ tcache_dalloc_small(tsd_t *tsd, tcache_t *tcache, void *ptr, szind_t binind,
 	if (slow_path && config_fill && unlikely(opt_junk_free)) {
 		arena_dalloc_junk_small(ptr, &bin_infos[binind]);
 	}
-
+    /* 小内存优先释放到bin中 */
 	bin = tcache_small_bin_get(tcache, binind);
 	bin_info = &tcache_bin_info[binind];
 	if (unlikely(!cache_bin_dalloc_easy(bin, bin_info, ptr))) {
+        /* 如果bin缓存的object的数目达到上限,那么要进行flush操作 */
 		tcache_bin_flush_small(tsd, tcache, bin, binind,
 		    (bin_info->ncached_max >> 1));
 		bool ret = cache_bin_dalloc_easy(bin, bin_info, ptr);

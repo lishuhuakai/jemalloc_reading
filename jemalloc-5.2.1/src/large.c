@@ -356,6 +356,9 @@ large_dalloc_finish(tsdn_t *tsdn, extent_t *extent) {
 	large_dalloc_finish_impl(tsdn, extent_arena_get(extent), extent);
 }
 
+/* 大内存的回收,将extent放入arena->extents_dirty中
+ * @param extent
+ */
 void
 large_dalloc(tsdn_t *tsdn, extent_t *extent) {
 	arena_t *arena = extent_arena_get(extent);

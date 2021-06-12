@@ -489,15 +489,20 @@ rtree_szind_slab_read_fast(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 		return false;
 	}
 }
+
+/*
+ * @param key 首地址,其实也作为key
+ */
 JEMALLOC_ALWAYS_INLINE bool
 rtree_szind_slab_read(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
     uintptr_t key, bool dependent, szind_t *r_szind, bool *r_slab) {
-	rtree_leaf_elm_t *elm = rtree_read(tsdn, rtree, rtree_ctx, key,
-	    dependent);
+    /* 从基数树中获取对应元素 */
+	rtree_leaf_elm_t *elm = rtree_read(tsdn, rtree, rtree_ctx, key, dependent);
 	if (!dependent && elm == NULL) {
 		return true;
 	}
 #ifdef RTREE_LEAF_COMPACT
+    /* 获取分配信息 */
 	uintptr_t bits = rtree_leaf_elm_bits_read(tsdn, rtree, elm, dependent);
 	*r_szind = rtree_leaf_elm_bits_szind_get(bits);
 	*r_slab = rtree_leaf_elm_bits_slab_get(bits);

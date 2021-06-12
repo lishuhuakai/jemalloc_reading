@@ -140,6 +140,7 @@ extent_addr_get(const extent_t *extent) {
 	return extent->e_addr;
 }
 
+/* 获取extent所管理内存的大小 */
 static inline size_t
 extent_size_get(const extent_t *extent) {
 	return (extent->e_size_esn & EXTENT_SIZE_MASK);
@@ -489,6 +490,7 @@ extent_ead_comp(const extent_t *a, const extent_t *b) {
 	return (a_eaddr > b_eaddr) - (a_eaddr < b_eaddr);
 }
 
+/* 比较sn码 */
 static inline int
 extent_snad_comp(const extent_t *a, const extent_t *b) {
 	int ret;

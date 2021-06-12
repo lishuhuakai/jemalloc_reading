@@ -19,7 +19,7 @@
  * so that negative numbers can encode "invalid" states (e.g. a low water mark
  * of -1 for a cache that has been depleted).
  */
-typedef int32_t cache_bin_sz_t; /* binµÄ´óÐ¡ */
+typedef int32_t cache_bin_sz_t; /* binçš„å¤§å° */
 
 typedef struct cache_bin_stats_s cache_bin_stats_t;
 struct cache_bin_stats_s {
@@ -27,7 +27,7 @@ struct cache_bin_stats_s {
 	 * Number of allocation requests that corresponded to the size of this
 	 * bin.
 	 */
-	uint64_t nrequests; /* ·ÖÅäÇëÇóµÄ¸öÊý */
+	uint64_t nrequests;  /* åˆ†é…è¯·æ±‚çš„ä¸ªæ•° */
 };
 
 /*
@@ -37,15 +37,15 @@ struct cache_bin_stats_s {
 typedef struct cache_bin_info_s cache_bin_info_t;
 struct cache_bin_info_s {
 	/* Upper limit on ncached. */
-	cache_bin_sz_t ncached_max; /* ÉÏÏÞ */
+	cache_bin_sz_t ncached_max;  /* ä¸Šé™ */
 };
 
 typedef struct cache_bin_s cache_bin_t;
 struct cache_bin_s {
 	/* Min # cached since last GC. */
-	cache_bin_sz_t low_water; /* µÍË®Î» */
+	cache_bin_sz_t low_water; /* ä½Žæ°´ä½ */
 	/* # of cached objects. */
-	cache_bin_sz_t ncached; /* ÒÑ¾­»º´æµÄobjectµÄÊýÄ¿ */
+	cache_bin_sz_t ncached; / /* å·²ç»ç¼“å­˜çš„objectçš„æ•°ç›® */
 	/*
 	 * ncached and stats are both modified frequently.  Let's keep them
 	 * close so that they have a higher chance of being on the same
@@ -70,13 +70,13 @@ struct cache_bin_array_descriptor_s {
 	 * The arena keeps a list of the cache bins associated with it, for
 	 * stats collection.
 	 */
-	ql_elm(cache_bin_array_descriptor_t) link; /* Á´±í  */
+	ql_elm(cache_bin_array_descriptor_t) link; /* é“¾è¡¨  */
 	/* Pointers to the tcache bins. */
 	cache_bin_t *bins_small;
 	cache_bin_t *bins_large;
 };
 
-/* cache_bin_array_descriptorµÄ³õÊ¼»¯ */
+/* cache_bin_array_descriptorçš„åˆå§‹åŒ– */
 static inline void
 cache_bin_array_descriptor_init(cache_bin_array_descriptor_t *descriptor,
     cache_bin_t *bins_small, cache_bin_t *bins_large) {
@@ -85,10 +85,10 @@ cache_bin_array_descriptor_init(cache_bin_array_descriptor_t *descriptor,
 	descriptor->bins_large = bins_large;
 }
 
-/* ´ÓbinÖÐ»ñÈ¡Ò»¸öÄÚ´æ¿é
- * @param success ÊÇ·ñ»ñÈ¡³É¹¦
+/* ä»Žbinä¸­èŽ·å–ä¸€ä¸ªå†…å­˜å—
+ * @param success æ˜¯å¦èŽ·å–æˆåŠŸ
  * @param bin
- * @return ·µ»ØÖ¸Õë
+ * @return è¿”å›žæŒ‡é’ˆ
  */
 JEMALLOC_ALWAYS_INLINE void *
 cache_bin_alloc_easy(cache_bin_t *bin, bool *success) {
@@ -122,9 +122,11 @@ cache_bin_alloc_easy(cache_bin_t *bin, bool *success) {
 	return ret;
 }
 
-/* ½«ptr»º´æµ½binÖÐ
- * @param bin_info ÅäÖÃÐÅÏ¢
+/* å°†ptrç¼“å­˜åˆ°binä¸­
+ * @param bin_info é…ç½®ä¿¡æ¯
+ * @return å¦‚æžœæˆåŠŸ,è¿”å›žtrue,å¦‚æžœbinæ»¡äº†,è¿”å›žfalse
  */
+
 JEMALLOC_ALWAYS_INLINE bool
 cache_bin_dalloc_easy(cache_bin_t *bin, cache_bin_info_t *bin_info, void *ptr) {
 	if (unlikely(bin->ncached == bin_info->ncached_max)) {
