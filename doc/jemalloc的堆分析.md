@@ -138,7 +138,7 @@ static ckh_t		bt2gctx;
 
 所有分配内存的流程都会通过下面的函数:
 
-![](.\pic\1.png)
+![](https://github.com/lishuhuakai/jemalloc_reading/blob/main/doc/pic/1.png?raw=true)
 
 
 
