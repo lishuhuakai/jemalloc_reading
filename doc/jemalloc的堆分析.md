@@ -1,0 +1,449 @@
+# 前提
+
+1. 暂时只分析使用`libunwind`库获取堆栈的情况,其他情况暂时不考虑.
+
+2. `libjemalloc`版本为5.2.1.
+
+# 数据结构
+
+第一个比较重要的结构是:
+
+```c
+/* 记录回溯的堆栈 */
+struct prof_bt_s {
+	/* Backtrace, stored as len program counters. */
+	void		**vec;  /* 每一层地址 */
+	unsigned	len;    /* 层数 */
+};
+
+typedef struct prof_bt_s prof_bt_t;
+```
+
+
+
+首先是`struct prof_gctx_s`,这个结构记录了全局的分配信息.
+
+```c
+/* prof global context */
+struct prof_gctx_s {
+	/* Protects nlimbo, cnt_summed, and tctxs. */
+	malloc_mutex_t		*lock;
+
+	/*
+	 * Number of threads that currently cause this gctx to be in a state of
+	 * limbo due to one of:
+	 *   - Initializing this gctx.
+	 *   - Initializing per thread counters associated with this gctx.
+	 *   - Preparing to destroy this gctx.
+	 *   - Dumping a heap profile that includes this gctx.
+	 * nlimbo must be 1 (single destroyer) in order to safely destroy the
+	 * gctx.
+	 */
+	/* limbo -- 处于不定的状态 */
+	unsigned		nlimbo; /* 由于是多线程,nlimbo类似于引用计数 */
+
+	/*
+	 * Tree of profile counters, one for each thread that has allocated in
+	 * this context.
+	 */
+	prof_tctx_tree_t	tctxs; /* 这里事实上是一颗红黑树,记录了每个线程的分配信息 */
+
+	/* Linkage for tree of contexts to be dumped. */
+	rb_node(prof_gctx_t)	dump_link;
+
+	/* Temporary storage for summation during dump. */
+	prof_cnt_t		cnt_summed; /* 临时变量,主要用于统计分配了多少字节,多少object */
+
+	/* Associated backtrace. */
+	prof_bt_t		bt; /* 记录下对应的堆栈信息 */
+
+	/* Backtrace vector, variable size, referred to by bt. */
+	void			*vec[1];
+};
+
+typedef struct prof_gctx_s prof_gctx_t;
+```
+
+接下来是`struct prof_tctx_s`,这个结构记录了线程内存分配信息
+
+```c
+/* prof thread context */
+struct prof_tctx_s {
+	/* Thread data for thread that performed the allocation. */
+	prof_tdata_t		*tdata; /* 执行分配操作的线程的thread data */
+
+	/*
+	 * Copy of tdata->thr_{uid,discrim}, necessary because tdata may be
+	 * defunct during teardown.
+	 */
+	uint64_t		thr_uid;
+	uint64_t		thr_discrim;
+
+	/* Profiling counters, protected by tdata->lock. */
+	prof_cnt_t		cnts;
+
+	/* Associated global context. */
+	prof_gctx_t		*gctx;
+
+	/*
+	 * UID that distinguishes multiple tctx's created by the same thread,
+	 * but coexisting in gctx->tctxs.  There are two ways that such
+	 * coexistence can occur:
+	 * - A dumper thread can cause a tctx to be retained in the purgatory
+	 *   state.
+	 * - Although a single "producer" thread must create all tctx's which
+	 *   share the same thr_uid, multiple "consumers" can each concurrently
+	 *   execute portions of prof_tctx_destroy().  prof_tctx_destroy() only
+	 *   gets called once each time cnts.cur{objs,bytes} drop to 0, but this
+	 *   threshold can be hit again before the first consumer finishes
+	 *   executing prof_tctx_destroy().
+	 */
+	uint64_t		tctx_uid;
+
+	/* Linkage into gctx's tctxs. */
+	rb_node(prof_tctx_t)	tctx_link;
+
+	/*
+	 * True during prof_alloc_prep()..prof_malloc_sample_object(), prevents
+	 * sample vs destroy race.
+	 */
+	bool			prepared;
+
+	/* Current dump-related state, protected by gctx->lock. */
+	prof_tctx_state_t	state;
+
+	/*
+	 * Copy of cnts snapshotted during early dump phase, protected by
+	 * dump_mtx.
+	 */
+	prof_cnt_t		dump_cnts;
+};
+typedef struct prof_tctx_s prof_tctx_t;
+```
+
+在`prof.c`文件中,有一些比较重要的变量,这里也一一介绍一下:
+
+```c
+/*
+ * Global hash of (prof_bt_t *)-->(prof_gctx_t *).  This is the master data
+ * structure that knows about all backtraces currently captured.
+ */
+static ckh_t		bt2gctx; 
+/* hash表,实现(prof_bt_t *) -> (prof_gctx_t *)的映射,这里面记录了所有的backtrace */
+```
+
+# 流程
+
+## 分配内存
+
+所有分配内存的流程都会通过下面的函数:
+
+![](.\pic\1.png)
+
+
+
+```c
+JEMALLOC_ALWAYS_INLINE prof_tctx_t *
+prof_alloc_prep(tsd_t *tsd, size_t usize, bool prof_active, bool update) {
+	prof_tctx_t *ret;
+	prof_tdata_t *tdata;
+	prof_bt_t bt;
+
+	assert(usize == sz_s2u(usize));
+
+	if (!prof_active || likely(prof_sample_accum_update(tsd, usize, update,
+	    &tdata))) {
+		ret = (prof_tctx_t *)(uintptr_t)1U;
+	} else {
+		bt_init(&bt, tdata->vec);
+		prof_backtrace(&bt); /* 通过回溯获得堆栈信息 */
+		ret = prof_lookup(tsd, &bt); /* 然后查找 */
+	}
+
+	return ret;
+}
+```
+
+`prof_backtrace`函数可以获取堆栈信息,保存在bt结构中.
+
+```c
+/* 根据堆栈来进行查找
+ * @param bt 堆栈信息
+ * @param tsd 线程私有数据
+ */
+prof_tctx_t *
+prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
+	union {
+		prof_tctx_t	*p;
+		void		*v;
+	} ret;
+	prof_tdata_t *tdata;
+	bool not_found;
+
+	cassert(config_prof);
+
+	tdata = prof_tdata_get(tsd, false); /* 获取线程私有的数据 */
+	if (tdata == NULL) {
+		return NULL;
+	}
+
+	malloc_mutex_lock(tsd_tsdn(tsd), tdata->lock);
+    /* 这里直接将堆栈作为key,进行查找 */
+	not_found = ckh_search(&tdata->bt2tctx, bt, NULL, &ret.v);
+	if (!not_found) { /* Note double negative! */
+		ret.p->prepared = true;
+	}
+	malloc_mutex_unlock(tsd_tsdn(tsd), tdata->lock);
+	if (not_found) { /* 没有找到,说明此线程没有通过这样的堆栈分配过内存,或者分配过,但是释放掉了 */
+		void *btkey;
+		prof_gctx_t *gctx;
+		bool new_gctx, error;
+
+		/*
+		 * This thread's cache lacks bt.  Look for it in the global
+		 * cache.
+		 */
+		/* 在全局cache中进行查找 */
+		if (prof_lookup_global(tsd, bt, tdata, &btkey, &gctx,
+		    &new_gctx)) {
+			return NULL;
+		}
+
+		/* Link a prof_tctx_t into gctx for this thread. */
+        /* 创建一个新的prof_tctx_t结构体 */
+		ret.v = iallocztm(tsd_tsdn(tsd), sizeof(prof_tctx_t),
+		    sz_size2index(sizeof(prof_tctx_t)), false, NULL, true,
+		    arena_ichoose(tsd, NULL), true); /* 内存分配 */
+		if (ret.p == NULL) {
+			if (new_gctx) {
+				prof_gctx_try_destroy(tsd, tdata, gctx, tdata);
+			}
+			return NULL;
+		}
+		ret.p->tdata = tdata;
+		ret.p->thr_uid = tdata->thr_uid;
+		ret.p->thr_discrim = tdata->thr_discrim;
+		memset(&ret.p->cnts, 0, sizeof(prof_cnt_t));
+		ret.p->gctx = gctx; /* prof_tctx 与 prof_gctx联系起来 */
+		ret.p->tctx_uid = tdata->tctx_uid_next++;
+		ret.p->prepared = true;
+		ret.p->state = prof_tctx_state_initializing;
+		malloc_mutex_lock(tsd_tsdn(tsd), tdata->lock);
+        /* 插入hash表 */
+		error = ckh_insert(tsd, &tdata->bt2tctx, btkey, ret.v);
+		malloc_mutex_unlock(tsd_tsdn(tsd), tdata->lock);
+		if (error) {
+			if (new_gctx) {
+				prof_gctx_try_destroy(tsd, tdata, gctx, tdata);
+			}
+			idalloctm(tsd_tsdn(tsd), ret.v, NULL, NULL, true, true);
+			return NULL;
+		}
+		malloc_mutex_lock(tsd_tsdn(tsd), gctx->lock);
+		ret.p->state = prof_tctx_state_nominal;
+		tctx_tree_insert(&gctx->tctxs, ret.p); /* 同时也要插入红黑树,看清楚了,这里将prof_tctxs与prof_gctxs联系起来了 */
+		gctx->nlimbo--;
+		malloc_mutex_unlock(tsd_tsdn(tsd), gctx->lock);
+	}
+
+	return ret.p;
+}
+
+```
+
+`prof_lookup_global`其实就是在前面介绍的`bt2gctx` hash表中查找,如果没找到,就创建一个新的.
+
+
+
+## 内存释放流程
+
+释放流程的prof都会经过下面的函数`prof_free_sampled_object`:
+
+```c
+/* prof内存释放
+ * @param ptr 首地址
+ * @param usize 长度
+ * @param tctx 线程分配信息
+ */
+void
+prof_free_sampled_object(tsd_t *tsd, const void *ptr, size_t usize,
+    prof_tctx_t *tctx) {
+	malloc_mutex_lock(tsd_tsdn(tsd), tctx->tdata->lock);
+
+	assert(tctx->cnts.curobjs > 0);
+	assert(tctx->cnts.curbytes >= usize);
+	tctx->cnts.curobjs--; /* 分配的object数目减去1 */
+	tctx->cnts.curbytes -= usize; /* 分配的字节数减去usize */
+
+	prof_try_log(tsd, ptr, usize, tctx);
+
+	if (prof_tctx_should_destroy(tsd_tsdn(tsd), tctx)) {
+		prof_tctx_destroy(tsd, tctx); /* 释放tctx这个实例 */
+	} else {
+		malloc_mutex_unlock(tsd_tsdn(tsd), tctx->tdata->lock);
+	}
+}
+```
+
+`prof_ctx_destory`这个函数要做的很简单,我不打算细细讲,想要了解的,自己看我的代码注释.
+
+它的流程如下,大致就是 `prof_lookup` 的反流程.
+
+1. 将tctx从对应的gctx->tctxs中移除;
+2. 如果gctx->tctxs满足条件(参照 `prof_gctx_should_destory` 函数),大概就是,没有其他线程通过这个堆栈分配内存等,就要删除这个gctx;
+
+
+
+## 信息打印
+
+```c
+/* 打印prof信息
+ * @param leakcheck 是否检查内存泄漏
+ * @param filename 文件名称
+ */
+static bool
+prof_dump(tsd_t *tsd, bool propagate_err, const char *filename,
+    bool leakcheck) {
+	cassert(config_prof);
+	assert(tsd_reentrancy_level_get(tsd) == 0);
+
+	prof_tdata_t * tdata = prof_tdata_get(tsd, true);
+	if (tdata == NULL) {
+		return true;
+	}
+
+	pre_reentrancy(tsd, NULL);
+	malloc_mutex_lock(tsd_tsdn(tsd), &prof_dump_mtx);
+
+	prof_gctx_tree_t gctxs; /* 红黑树,记录所有的堆栈 */
+	struct prof_tdata_merge_iter_arg_s prof_tdata_merge_iter_arg;
+	struct prof_gctx_merge_iter_arg_s prof_gctx_merge_iter_arg;
+	struct prof_gctx_dump_iter_arg_s prof_gctx_dump_iter_arg;
+	prof_dump_prep(tsd, tdata, &prof_tdata_merge_iter_arg,
+	    &prof_gctx_merge_iter_arg, &gctxs);
+    /* 将堆栈写入文件 */
+	bool err = prof_dump_file(tsd, propagate_err, filename, leakcheck, tdata,
+	    &prof_tdata_merge_iter_arg, &prof_gctx_merge_iter_arg,
+	    &prof_gctx_dump_iter_arg, &gctxs);
+	prof_gctx_finish(tsd, &gctxs);
+
+	malloc_mutex_unlock(tsd_tsdn(tsd), &prof_dump_mtx);
+	post_reentrancy(tsd);
+
+	if (err) {
+		return true;
+	}
+
+	if (leakcheck) {
+		prof_leakcheck(&prof_tdata_merge_iter_arg.cnt_all,
+		    prof_gctx_merge_iter_arg.leak_ngctx, filename);
+	}
+	return false;
+}
+```
+
+`prof_dump_prep` 主要做一些dump的前期工作,包括:
+
+1. 填充 `gctxs` 这个红黑树;
+2. 统计所有进程分配了多少object,多少字节.
+
+```c
+/* dump的前期准备工作
+ *
+ */
+static void
+prof_dump_prep(tsd_t *tsd, prof_tdata_t *tdata,
+    struct prof_tdata_merge_iter_arg_s *prof_tdata_merge_iter_arg,
+    struct prof_gctx_merge_iter_arg_s *prof_gctx_merge_iter_arg,
+    prof_gctx_tree_t *gctxs) {
+	size_t tabind;
+	union {
+		prof_gctx_t	*p;
+		void		*v;
+	} gctx;
+
+	prof_enter(tsd, tdata);
+
+	/*
+	 * Put gctx's in limbo and clear their counters in preparation for
+	 * summing.
+	 */
+	gctx_tree_new(gctxs); /* 创建红黑树 */
+	for (tabind = 0; !ckh_iter(&bt2gctx, &tabind, NULL, &gctx.v);) {
+        /* 将所有元素(类型prof_gctx_t *)插入gctxs中 */
+		prof_dump_gctx_prep(tsd_tsdn(tsd), gctx.p, gctxs);
+	}
+
+	/*
+	 * Iterate over tdatas, and for the non-expired ones snapshot their tctx
+	 * stats and merge them into the associated gctx's.
+	 */
+	prof_tdata_merge_iter_arg->tsdn = tsd_tsdn(tsd);
+	memset(&prof_tdata_merge_iter_arg->cnt_all, 0, sizeof(prof_cnt_t));
+	malloc_mutex_lock(tsd_tsdn(tsd), &tdatas_mtx);
+    /* 统计所有进程分配了多少字节,分配了多少object */
+	tdata_tree_iter(&tdatas, NULL, prof_tdata_merge_iter,
+	    (void *)prof_tdata_merge_iter_arg);
+	malloc_mutex_unlock(tsd_tsdn(tsd), &tdatas_mtx);
+
+	/* Merge tctx stats into gctx's. */
+	prof_gctx_merge_iter_arg->tsdn = tsd_tsdn(tsd);
+	prof_gctx_merge_iter_arg->leak_ngctx = 0;
+	gctx_tree_iter(gctxs, NULL, prof_gctx_merge_iter,
+	    (void *)prof_gctx_merge_iter_arg);
+
+	prof_leave(tsd, tdata);
+}
+```
+
+`prof_dump_file` 将堆栈,map等信息写入文件.
+
+```c
+/* 输出所有的堆栈信息
+ * @param gctxs 红黑树,记录了所有的堆信息
+ * @param tdata
+ */
+static bool
+prof_dump_file(tsd_t *tsd, bool propagate_err, const char *filename,
+    bool leakcheck, prof_tdata_t *tdata,
+    struct prof_tdata_merge_iter_arg_s *prof_tdata_merge_iter_arg,
+    struct prof_gctx_merge_iter_arg_s *prof_gctx_merge_iter_arg,
+    struct prof_gctx_dump_iter_arg_s *prof_gctx_dump_iter_arg,
+    prof_gctx_tree_t *gctxs) {
+	/* Create dump file. */
+	if ((prof_dump_fd = prof_dump_open(propagate_err, filename)) == -1) {
+		return true;
+	}
+
+	/* Dump profile header. */
+	if (prof_dump_header(tsd_tsdn(tsd), propagate_err,
+	    &prof_tdata_merge_iter_arg->cnt_all)) {
+		goto label_write_error;
+	}
+
+	/* Dump per gctx profile stats. */
+	prof_gctx_dump_iter_arg->tsdn = tsd_tsdn(tsd);
+	prof_gctx_dump_iter_arg->propagate_err = propagate_err;
+    /* 遍历每一个堆栈, 输出堆栈信息 */
+	if (gctx_tree_iter(gctxs, NULL, prof_gctx_dump_iter,
+	    (void *)prof_gctx_dump_iter_arg) != NULL) {
+		goto label_write_error;
+	}
+    /* 输出map信息 */
+	/* Dump /proc/<pid>/maps if possible. */
+	if (prof_dump_maps(propagate_err)) {
+		goto label_write_error;
+	}
+
+	if (prof_dump_close(propagate_err)) {
+		return true;
+	}
+
+	return false;
+label_write_error:
+	prof_dump_close(propagate_err);
+	return true;
+}
+
+```
+
