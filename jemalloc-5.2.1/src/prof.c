@@ -34,11 +34,13 @@ bool		opt_prof = false;           /* 是否开启检测功能 */
 bool		opt_prof_active = true;
 bool		opt_prof_thread_active_init = true;
 size_t		opt_lg_prof_sample = LG_PROF_SAMPLE_DEFAULT;
-ssize_t		opt_lg_prof_interval = LG_PROF_INTERVAL_DEFAULT;
+ssize_t		opt_lg_prof_interval = LG_PROF_INTERVAL_DEFAULT; /* 打印时间间隔 */
 bool		opt_prof_gdump = false;
-bool		opt_prof_final = false;
+bool		opt_prof_final = false; /* 程序退出的时候,打印内存泄漏 */
 bool		opt_prof_leak = false;  /* 是否检测泄漏 */
-bool		opt_prof_accum = false;
+bool		opt_prof_accum = false; /* 是否检测累计分配了的字节和object的情况,如果开启,每一个独特的堆栈回溯都会被记录下来
+                                       * 即使这个堆栈对应的内存已经释放了,因此打开这个选项可能非常耗费内存.
+                                       */
 bool		opt_prof_log = false;
 char		opt_prof_prefix[
     /* Minimize memory bloat for non-prof builds. */
@@ -188,7 +190,7 @@ static malloc_mutex_t	*tdata_locks;
  * Global hash of (prof_bt_t *)-->(prof_gctx_t *).  This is the master data
  * structure that knows about all backtraces currently captured.
  */
-static ckh_t		bt2gctx;
+static ckh_t		bt2gctx; /* hash表,实现(prof_bt_t *) -> (prof_gctx_t *)的映射,这里面记录了所有的backtrace */
 /* Non static to enable profiling. */
 malloc_mutex_t		bt2gctx_mtx;
 
@@ -249,7 +251,6 @@ static bool prof_bt_node_keycomp(const void *k1, const void *k2);
 
 /******************************************************************************/
 /* Red-black trees. */
-
 static int
 prof_tctx_comp(const prof_tctx_t *a, const prof_tctx_t *b) {
 	uint64_t a_thr_uid = a->thr_uid;
@@ -270,6 +271,16 @@ prof_tctx_comp(const prof_tctx_t *a, const prof_tctx_t *b) {
 	return ret;
 }
 
+/* 声明红黑树,展开后大致如下
+ *  static UNUSED tctx_tree_new(prof_tctx_tree_t *rbtree) {
+ *      rb_new(prof_tctx_t, tctx_link, rbtree);
+ *  }
+ *  static UNUSED bool tctx_tree_empty(prof_tctx_tree_t *rbtree) {
+ *      return rbtree->rbt_root == NULL;
+ * }
+ * ...
+ * 剩余部分过分冗长,总之类似于CPP中的模板
+ */
 rb_gen(static UNUSED, tctx_tree_, prof_tctx_tree_t, prof_tctx_t,
     tctx_link, prof_tctx_comp)
 
@@ -440,6 +451,9 @@ prof_log_thr_index(tsd_t *tsd, uint64_t thr_uid, const char *name) {
 	}
 }
 
+/* 尝试记录分配了多少内存,释放了多少内存
+ *
+ */
 static void
 prof_try_log(tsd_t *tsd, const void *ptr, size_t usize, prof_tctx_t *tctx) {
 	malloc_mutex_assert_owner(tsd_tsdn(tsd), tctx->tdata->lock);
@@ -461,6 +475,7 @@ prof_try_log(tsd_t *tsd, const void *ptr, size_t usize, prof_tctx_t *tctx) {
 	}
 
 	if (!log_tables_initialized) {
+        /* 创建两个hash表 */
 		bool err1 = ckh_new(tsd, &log_bt_node_set, PROF_CKH_MINITEMS,
 				prof_bt_node_hash, prof_bt_node_keycomp);
 		bool err2 = ckh_new(tsd, &log_thr_node_set, PROF_CKH_MINITEMS,
@@ -482,13 +497,13 @@ prof_try_log(tsd_t *tsd, const void *ptr, size_t usize, prof_tctx_t *tctx) {
 	    arena_get(TSDN_NULL, 0, true), true);
 
 	const char *prod_thr_name = (tctx->tdata->thread_name == NULL)?
-				        "" : tctx->tdata->thread_name;
+				        "" : tctx->tdata->thread_name; /* 线程名称 */
 	const char *cons_thr_name = prof_thread_name_get(tsd);
 
 	prof_bt_t bt;
 	/* Initialize the backtrace, using the buffer in tdata to store it. */
 	bt_init(&bt, cons_tdata->vec);
-	prof_backtrace(&bt);
+	prof_backtrace(&bt); /* 获取堆栈信息 */
 	prof_bt_t *cons_bt = &bt;
 
 	/* We haven't destroyed tctx yet, so gctx should be good to read. */
@@ -517,6 +532,10 @@ label_done:
 	malloc_mutex_unlock(tsd_tsdn(tsd), &log_mtx);
 }
 
+/* prof内存释放
+ * @param ptr 首地址
+ * @param usize 长度
+ */
 void
 prof_free_sampled_object(tsd_t *tsd, const void *ptr, size_t usize,
     prof_tctx_t *tctx) {
@@ -584,6 +603,7 @@ prof_leave(tsd_t *tsd, prof_tdata_t *tdata) {
 }
 
 #ifdef JEMALLOC_PROF_LIBUNWIND
+/* 使用libunwind来进行回溯 */
 void
 prof_backtrace(prof_bt_t *bt) {
 	int nframes;
@@ -817,12 +837,14 @@ prof_tdata_mutex_choose(uint64_t thr_uid) {
 	return &tdata_locks[thr_uid % PROF_NTDATA_LOCKS];
 }
 
+/* 创建一个prof_gctx_t 结构体 */
 static prof_gctx_t *
 prof_gctx_create(tsdn_t *tsdn, prof_bt_t *bt) {
 	/*
 	 * Create a single allocation that has space for vec of length bt->len.
 	 */
 	size_t size = offsetof(prof_gctx_t, vec) + (bt->len * sizeof(void *));
+    /* 内存分配 */
 	prof_gctx_t *gctx = (prof_gctx_t *)iallocztm(tsdn, size,
 	    sz_size2index(size), false, NULL, true, arena_get(TSDN_NULL, 0, true),
 	    true);
@@ -843,6 +865,9 @@ prof_gctx_create(tsdn_t *tsdn, prof_bt_t *bt) {
 	return gctx;
 }
 
+/* 将
+ *
+ */
 static void
 prof_gctx_try_destroy(tsd_t *tsd, prof_tdata_t *tdata_self, prof_gctx_t *gctx,
     prof_tdata_t *tdata) {
@@ -894,24 +919,30 @@ prof_tctx_should_destroy(tsdn_t *tsdn, prof_tctx_t *tctx) {
 	return true;
 }
 
+/* 判断是否应该删除此gctx结构
+ *
+ */
 static bool
 prof_gctx_should_destroy(prof_gctx_t *gctx) {
 	if (opt_prof_accum) {
 		return false;
 	}
-	if (!tctx_tree_empty(&gctx->tctxs)) {
+	if (!tctx_tree_empty(&gctx->tctxs)) { /* 有其他线程通过同样的堆栈分配了内存,不能删除 */
 		return false;
 	}
-	if (gctx->nlimbo != 0) {
+	if (gctx->nlimbo != 0) { /* 有其他线程也在操作此结构 */
 		return false;
 	}
 	return true;
 }
 
+/* 释放prof_tctx_t结构体
+ *
+ */
 static void
 prof_tctx_destroy(tsd_t *tsd, prof_tctx_t *tctx) {
-	prof_tdata_t *tdata = tctx->tdata;
-	prof_gctx_t *gctx = tctx->gctx;
+	prof_tdata_t *tdata = tctx->tdata; /* 线程相关的prof数据 */
+	prof_gctx_t *gctx = tctx->gctx; /* 与本结构体相关的prof_gctx_t结构体 */
 	bool destroy_tdata, destroy_tctx, destroy_gctx;
 
 	malloc_mutex_assert_owner(tsd_tsdn(tsd), tctx->tdata->lock);
@@ -921,7 +952,7 @@ prof_tctx_destroy(tsd_t *tsd, prof_tctx_t *tctx) {
 	assert(!opt_prof_accum);
 	assert(tctx->cnts.accumobjs == 0);
 	assert(tctx->cnts.accumbytes == 0);
-
+    /* 将tctx从tdata->bt2tctx hash表中移除 */
 	ckh_remove(tsd, &tdata->bt2tctx, &gctx->bt, NULL, NULL);
 	destroy_tdata = prof_tdata_should_destroy(tsd_tsdn(tsd), tdata, false);
 	malloc_mutex_unlock(tsd_tsdn(tsd), tdata->lock);
@@ -929,7 +960,7 @@ prof_tctx_destroy(tsd_t *tsd, prof_tctx_t *tctx) {
 	malloc_mutex_lock(tsd_tsdn(tsd), gctx->lock);
 	switch (tctx->state) {
 	case prof_tctx_state_nominal:
-		tctx_tree_remove(&gctx->tctxs, tctx);
+		tctx_tree_remove(&gctx->tctxs, tctx); /* 将tctx从gctx->tctxs中移除 */
 		destroy_tctx = true;
 		if (prof_gctx_should_destroy(gctx)) {
 			/*
@@ -952,7 +983,8 @@ prof_tctx_destroy(tsd_t *tsd, prof_tctx_t *tctx) {
 			destroy_gctx = false;
 		}
 		break;
-	case prof_tctx_state_dumping:
+	case prof_tctx_state_dumping: /* 此节点正在进行dump操作 */
+        /* 暂时不能进行删除 */
 		/*
 		 * A dumping thread needs tctx to remain valid until dumping
 		 * has finished.  Change state such that the dumping thread will
@@ -984,6 +1016,12 @@ prof_tctx_destroy(tsd_t *tsd, prof_tctx_t *tctx) {
 	}
 }
 
+/*
+ * @param bt 堆栈信息
+ * @param p_gctx 查找的结构将放入这个结构之中
+ * @param p_btkey key将放入此结构中
+ * @return 返回true表示出现了错误
+ */
 static bool
 prof_lookup_global(tsd_t *tsd, prof_bt_t *bt, prof_tdata_t *tdata,
     void **p_btkey, prof_gctx_t **p_gctx, bool *p_new_gctx) {
@@ -999,6 +1037,7 @@ prof_lookup_global(tsd_t *tsd, prof_bt_t *bt, prof_tdata_t *tdata,
 
 	prof_enter(tsd, tdata);
 	if (ckh_search(&bt2gctx, bt, &btkey.v, &gctx.v)) {
+        /* 执行到这里,表示并没有找到 */
 		/* bt has never been seen before.  Insert it. */
 		prof_leave(tsd, tdata);
 		tgctx.p = prof_gctx_create(tsd_tsdn(tsd), bt);
@@ -1006,10 +1045,12 @@ prof_lookup_global(tsd_t *tsd, prof_bt_t *bt, prof_tdata_t *tdata,
 			return true;
 		}
 		prof_enter(tsd, tdata);
+        /* 继续查找,很有可能别的线程插入了新的node */
 		if (ckh_search(&bt2gctx, bt, &btkey.v, &gctx.v)) {
+            /* 依然没有找到 */
 			gctx.p = tgctx.p;
 			btkey.p = &gctx.p->bt;
-			if (ckh_insert(tsd, &bt2gctx, btkey.v, gctx.v)) {
+			if (ckh_insert(tsd, &bt2gctx, btkey.v, gctx.v)) { /* 插入 */
 				/* OOM. */
 				prof_leave(tsd, tdata);
 				idalloctm(tsd_tsdn(tsd), gctx.v, NULL, NULL,
@@ -1049,6 +1090,10 @@ prof_lookup_global(tsd_t *tsd, prof_bt_t *bt, prof_tdata_t *tdata,
 	return false;
 }
 
+/*
+ * @param bt 堆栈信息
+ * @param tsd 线程私有数据
+ */
 prof_tctx_t *
 prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 	union {
@@ -1066,12 +1111,13 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 	}
 
 	malloc_mutex_lock(tsd_tsdn(tsd), tdata->lock);
+    /* 这里直接将堆栈作为key,进行查找 */
 	not_found = ckh_search(&tdata->bt2tctx, bt, NULL, &ret.v);
 	if (!not_found) { /* Note double negative! */
 		ret.p->prepared = true;
 	}
 	malloc_mutex_unlock(tsd_tsdn(tsd), tdata->lock);
-	if (not_found) {
+	if (not_found) { /* 没有找到 */
 		void *btkey;
 		prof_gctx_t *gctx;
 		bool new_gctx, error;
@@ -1080,6 +1126,7 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 		 * This thread's cache lacks bt.  Look for it in the global
 		 * cache.
 		 */
+		/* 在全局cache中进行查找 */
 		if (prof_lookup_global(tsd, bt, tdata, &btkey, &gctx,
 		    &new_gctx)) {
 			return NULL;
@@ -1088,7 +1135,7 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 		/* Link a prof_tctx_t into gctx for this thread. */
 		ret.v = iallocztm(tsd_tsdn(tsd), sizeof(prof_tctx_t),
 		    sz_size2index(sizeof(prof_tctx_t)), false, NULL, true,
-		    arena_ichoose(tsd, NULL), true);
+		    arena_ichoose(tsd, NULL), true); /* 内存分配 */
 		if (ret.p == NULL) {
 			if (new_gctx) {
 				prof_gctx_try_destroy(tsd, tdata, gctx, tdata);
@@ -1099,11 +1146,12 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 		ret.p->thr_uid = tdata->thr_uid;
 		ret.p->thr_discrim = tdata->thr_discrim;
 		memset(&ret.p->cnts, 0, sizeof(prof_cnt_t));
-		ret.p->gctx = gctx;
+		ret.p->gctx = gctx; /* prof_tctx 与 prof_gctx联系起来 */
 		ret.p->tctx_uid = tdata->tctx_uid_next++;
 		ret.p->prepared = true;
 		ret.p->state = prof_tctx_state_initializing;
 		malloc_mutex_lock(tsd_tsdn(tsd), tdata->lock);
+        /* 插入hash表 */
 		error = ckh_insert(tsd, &tdata->bt2tctx, btkey, ret.v);
 		malloc_mutex_unlock(tsd_tsdn(tsd), tdata->lock);
 		if (error) {
@@ -1115,7 +1163,7 @@ prof_lookup(tsd_t *tsd, prof_bt_t *bt) {
 		}
 		malloc_mutex_lock(tsd_tsdn(tsd), gctx->lock);
 		ret.p->state = prof_tctx_state_nominal;
-		tctx_tree_insert(&gctx->tctxs, ret.p);
+		tctx_tree_insert(&gctx->tctxs, ret.p); /* 同时也要插入红黑树 */
 		gctx->nlimbo--;
 		malloc_mutex_unlock(tsd_tsdn(tsd), gctx->lock);
 	}
@@ -1190,6 +1238,7 @@ prof_tdata_count_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
 	return NULL;
 }
 
+/* 计算tdata的个数 */
 size_t
 prof_tdata_count(void) {
 	size_t tdata_count = 0;
@@ -1203,7 +1252,7 @@ prof_tdata_count(void) {
 
 	return tdata_count;
 }
-
+/* 获取prof bt的个数,也就是堆栈的个数 */
 size_t
 prof_bt_count(void) {
 	size_t bt_count;
@@ -1224,6 +1273,7 @@ prof_bt_count(void) {
 }
 #endif
 
+/* 创建文件,返回句柄 */
 static int
 prof_dump_open_impl(bool propagate_err, const char *filename) {
 	int fd;
@@ -1323,6 +1373,9 @@ prof_dump_printf(bool propagate_err, const char *format, ...) {
 	return ret;
 }
 
+/* 将数据合并起来
+ *
+ */
 static void
 prof_tctx_merge_tdata(tsdn_t *tsdn, prof_tctx_t *tctx, prof_tdata_t *tdata) {
 	malloc_mutex_assert_owner(tsdn, tctx->tdata->lock);
@@ -1334,7 +1387,7 @@ prof_tctx_merge_tdata(tsdn_t *tsdn, prof_tctx_t *tctx, prof_tdata_t *tdata) {
 		malloc_mutex_unlock(tsdn, tctx->gctx->lock);
 		return;
 	case prof_tctx_state_nominal:
-		tctx->state = prof_tctx_state_dumping;
+		tctx->state = prof_tctx_state_dumping; /* 进入到dump阶段 */
 		malloc_mutex_unlock(tsdn, tctx->gctx->lock);
 
 		memcpy(&tctx->dump_cnts, &tctx->cnts, sizeof(prof_cnt_t));
@@ -1465,6 +1518,7 @@ prof_dump_gctx_prep(tsdn_t *tsdn, prof_gctx_t *gctx, prof_gctx_tree_t *gctxs) {
 	malloc_mutex_unlock(tsdn, gctx->lock);
 }
 
+/* 主要用于统计 */
 struct prof_gctx_merge_iter_arg_s {
 	tsdn_t	*tsdn;
 	size_t	leak_ngctx;
@@ -1476,6 +1530,7 @@ prof_gctx_merge_iter(prof_gctx_tree_t *gctxs, prof_gctx_t *gctx, void *opaque) {
 	    (struct prof_gctx_merge_iter_arg_s *)opaque;
 
 	malloc_mutex_lock(arg->tsdn, gctx->lock);
+    /* gctx->tctxs中记录了每个线程的分配情况,prof_tctx_merge_iter用于统计所有线程的分配情况 */
 	tctx_tree_iter(&gctx->tctxs, NULL, prof_tctx_merge_iter,
 	    (void *)arg->tsdn);
 	if (gctx->cnt_summed.curobjs != 0) {
@@ -1525,6 +1580,7 @@ prof_gctx_finish(tsd_t *tsd, prof_gctx_tree_t *gctxs) {
 		if (prof_gctx_should_destroy(gctx)) {
 			gctx->nlimbo++;
 			malloc_mutex_unlock(tsd_tsdn(tsd), gctx->lock);
+            /* 删掉此结构 */
 			prof_gctx_try_destroy(tsd, tdata, gctx, tdata);
 		} else {
 			malloc_mutex_unlock(tsd_tsdn(tsd), gctx->lock);
@@ -1541,7 +1597,7 @@ static prof_tdata_t *
 prof_tdata_merge_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
     void *opaque) {
 	struct prof_tdata_merge_iter_arg_s *arg =
-	    (struct prof_tdata_merge_iter_arg_s *)opaque;
+	    (struct prof_tdata_merge_iter_arg_s *)opaque; /* 获取传入的参数信息 */
 
 	malloc_mutex_lock(arg->tsdn, tdata->lock);
 	if (!tdata->expired) {
@@ -1553,6 +1609,7 @@ prof_tdata_merge_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
 
 		tdata->dumping = true;
 		memset(&tdata->cnt_summed, 0, sizeof(prof_cnt_t));
+        /* 遍历bt2ctx, */
 		for (tabind = 0; !ckh_iter(&tdata->bt2tctx, &tabind, NULL,
 		    &tctx.v);) {
 			prof_tctx_merge_tdata(arg->tsdn, tctx.p, tdata);
@@ -1572,6 +1629,9 @@ prof_tdata_merge_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
 	return NULL;
 }
 
+/* 打印tdata
+ *
+ */
 static prof_tdata_t *
 prof_tdata_dump_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
     void *arg) {
@@ -1584,7 +1644,8 @@ prof_tdata_dump_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
 	if (prof_dump_printf(propagate_err,
 	    "  t%"FMTu64": %"FMTu64": %"FMTu64" [%"FMTu64": %"FMTu64"]%s%s\n",
 	    tdata->thr_uid, tdata->cnt_summed.curobjs,
-	    tdata->cnt_summed.curbytes, tdata->cnt_summed.accumobjs,
+	    tdata->cnt_summed.curbytes,
+	    tdata->cnt_summed.accumobjs,
 	    tdata->cnt_summed.accumbytes,
 	    (tdata->thread_name != NULL) ? " " : "",
 	    (tdata->thread_name != NULL) ? tdata->thread_name : "")) {
@@ -1593,6 +1654,9 @@ prof_tdata_dump_iter(prof_tdata_tree_t *tdatas, prof_tdata_t *tdata,
 	return NULL;
 }
 
+/* 输出头部文件
+ *
+ */
 static bool
 prof_dump_header_impl(tsdn_t *tsdn, bool propagate_err,
     const prof_cnt_t *cnt_all) {
@@ -1614,6 +1678,11 @@ prof_dump_header_impl(tsdn_t *tsdn, bool propagate_err,
 }
 prof_dump_header_t *JET_MUTABLE prof_dump_header = prof_dump_header_impl;
 
+/* 打印堆栈信息
+ * @param gctx 包含堆栈等信息
+ * @param bt 堆栈信息
+ * @parma prof_gctxs 红黑树
+ */
 static bool
 prof_dump_gctx(tsdn_t *tsdn, bool propagate_err, prof_gctx_t *gctx,
     const prof_bt_t *bt, prof_gctx_tree_t *gctxs) {
@@ -1639,6 +1708,7 @@ prof_dump_gctx(tsdn_t *tsdn, bool propagate_err, prof_gctx_t *gctx,
 		ret = true;
 		goto label_return;
 	}
+    /* 打印堆栈地址 */
 	for (i = 0; i < bt->len; i++) {
 		if (prof_dump_printf(propagate_err, " %#"FMTxPTR,
 		    (uintptr_t)bt->vec[i])) {
@@ -1646,7 +1716,7 @@ prof_dump_gctx(tsdn_t *tsdn, bool propagate_err, prof_gctx_t *gctx,
 			goto label_return;
 		}
 	}
-
+    /* 打印分配了多少内存,多少object */
 	if (prof_dump_printf(propagate_err,
 	    "\n"
 	    "  t*: %"FMTu64": %"FMTu64" [%"FMTu64": %"FMTu64"]\n",
@@ -1658,6 +1728,7 @@ prof_dump_gctx(tsdn_t *tsdn, bool propagate_err, prof_gctx_t *gctx,
 
 	prof_tctx_dump_iter_arg.tsdn = tsdn;
 	prof_tctx_dump_iter_arg.propagate_err = propagate_err;
+    /* 打印每一个线程的分配信息 */
 	if (tctx_tree_iter(&gctx->tctxs, NULL, prof_tctx_dump_iter,
 	    (void *)&prof_tctx_dump_iter_arg) != NULL) {
 		ret = true;
@@ -1799,6 +1870,10 @@ struct prof_gctx_dump_iter_arg_s {
 	bool	propagate_err;
 };
 
+/* 打印堆栈信息
+ * @param gctx 值
+ * @param opaque 参数信息
+ */
 static prof_gctx_t *
 prof_gctx_dump_iter(prof_gctx_tree_t *gctxs, prof_gctx_t *gctx, void *opaque) {
 	prof_gctx_t *ret;
@@ -1819,6 +1894,9 @@ label_return:
 	return ret;
 }
 
+/* dump的前期准备工作
+ *
+ */
 static void
 prof_dump_prep(tsd_t *tsd, prof_tdata_t *tdata,
     struct prof_tdata_merge_iter_arg_s *prof_tdata_merge_iter_arg,
@@ -1836,8 +1914,9 @@ prof_dump_prep(tsd_t *tsd, prof_tdata_t *tdata,
 	 * Put gctx's in limbo and clear their counters in preparation for
 	 * summing.
 	 */
-	gctx_tree_new(gctxs);
+	gctx_tree_new(gctxs); /* 创建红黑树 */
 	for (tabind = 0; !ckh_iter(&bt2gctx, &tabind, NULL, &gctx.v);) {
+        /* 将所有元素(类型prof_gctx_t *)插入gctxs中 */
 		prof_dump_gctx_prep(tsd_tsdn(tsd), gctx.p, gctxs);
 	}
 
@@ -1848,6 +1927,7 @@ prof_dump_prep(tsd_t *tsd, prof_tdata_t *tdata,
 	prof_tdata_merge_iter_arg->tsdn = tsd_tsdn(tsd);
 	memset(&prof_tdata_merge_iter_arg->cnt_all, 0, sizeof(prof_cnt_t));
 	malloc_mutex_lock(tsd_tsdn(tsd), &tdatas_mtx);
+    /* 统计所有进程分配了多少字节,分配了多少object */
 	tdata_tree_iter(&tdatas, NULL, prof_tdata_merge_iter,
 	    (void *)prof_tdata_merge_iter_arg);
 	malloc_mutex_unlock(tsd_tsdn(tsd), &tdatas_mtx);
@@ -1861,6 +1941,10 @@ prof_dump_prep(tsd_t *tsd, prof_tdata_t *tdata,
 	prof_leave(tsd, tdata);
 }
 
+/* 输出所有的堆栈信息
+ * @param gctxs 红黑树,记录了所有的堆信息
+ * @param tdata
+ */
 static bool
 prof_dump_file(tsd_t *tsd, bool propagate_err, const char *filename,
     bool leakcheck, prof_tdata_t *tdata,
@@ -1882,11 +1966,12 @@ prof_dump_file(tsd_t *tsd, bool propagate_err, const char *filename,
 	/* Dump per gctx profile stats. */
 	prof_gctx_dump_iter_arg->tsdn = tsd_tsdn(tsd);
 	prof_gctx_dump_iter_arg->propagate_err = propagate_err;
+    /* 遍历每一个堆栈, 输出堆栈信息 */
 	if (gctx_tree_iter(gctxs, NULL, prof_gctx_dump_iter,
 	    (void *)prof_gctx_dump_iter_arg) != NULL) {
 		goto label_write_error;
 	}
-
+    /* 输出map信息 */
 	/* Dump /proc/<pid>/maps if possible. */
 	if (prof_dump_maps(propagate_err)) {
 		goto label_write_error;
@@ -1902,6 +1987,10 @@ label_write_error:
 	return true;
 }
 
+/* 打印prof信息
+ * @param leakcheck 是否检查内存泄漏
+ * @param filename 文件名称
+ */
 static bool
 prof_dump(tsd_t *tsd, bool propagate_err, const char *filename,
     bool leakcheck) {
@@ -1916,12 +2005,13 @@ prof_dump(tsd_t *tsd, bool propagate_err, const char *filename,
 	pre_reentrancy(tsd, NULL);
 	malloc_mutex_lock(tsd_tsdn(tsd), &prof_dump_mtx);
 
-	prof_gctx_tree_t gctxs;
+	prof_gctx_tree_t gctxs; /* 红黑树,记录所有的堆栈 */
 	struct prof_tdata_merge_iter_arg_s prof_tdata_merge_iter_arg;
 	struct prof_gctx_merge_iter_arg_s prof_gctx_merge_iter_arg;
 	struct prof_gctx_dump_iter_arg_s prof_gctx_dump_iter_arg;
 	prof_dump_prep(tsd, tdata, &prof_tdata_merge_iter_arg,
 	    &prof_gctx_merge_iter_arg, &gctxs);
+    /* 将堆栈写入文件 */
 	bool err = prof_dump_file(tsd, propagate_err, filename, leakcheck, tdata,
 	    &prof_tdata_merge_iter_arg, &prof_gctx_merge_iter_arg,
 	    &prof_gctx_dump_iter_arg, &gctxs);
@@ -2045,6 +2135,9 @@ prof_accum_init(tsdn_t *tsdn, prof_accum_t *prof_accum) {
 	return false;
 }
 
+/* idump用来干啥?
+ *
+ */
 void
 prof_idump(tsdn_t *tsdn) {
 	tsd_t *tsd;
@@ -2102,6 +2195,9 @@ prof_mdump(tsd_t *tsd, const char *filename) {
 	return prof_dump(tsd, true, filename, false);
 }
 
+/* gdump用于干啥?
+ *
+ */
 void
 prof_gdump(tsdn_t *tsdn) {
 	tsd_t *tsd;
@@ -2136,6 +2232,9 @@ prof_gdump(tsdn_t *tsdn) {
 	}
 }
 
+/* 堆栈信息生成hash值
+ *
+ */
 static void
 prof_bt_hash(const void *key, size_t r_hash[2]) {
 	prof_bt_t *bt = (prof_bt_t *)key;
@@ -2145,6 +2244,9 @@ prof_bt_hash(const void *key, size_t r_hash[2]) {
 	hash(bt->vec, bt->len * sizeof(void *), 0x94122f33U, r_hash);
 }
 
+/* 两个key进行比较
+ *
+ */
 static bool
 prof_bt_keycomp(const void *k1, const void *k2) {
 	const prof_bt_t *bt1 = (prof_bt_t *)k1;
@@ -2185,6 +2287,7 @@ prof_thr_node_keycomp(const void *k1, const void *k2) {
 	return thr_node1->thr_uid == thr_node2->thr_uid;
 }
 
+/* 生成thread uid */
 static uint64_t
 prof_thr_uid_alloc(tsdn_t *tsdn) {
 	uint64_t thr_uid;
@@ -2197,6 +2300,7 @@ prof_thr_uid_alloc(tsdn_t *tsdn) {
 	return thr_uid;
 }
 
+/* prof_tdata结构的初始化 */
 static prof_tdata_t *
 prof_tdata_init_impl(tsd_t *tsd, uint64_t thr_uid, uint64_t thr_discrim,
     char *thread_name, bool active) {
@@ -2396,6 +2500,7 @@ prof_tdata_cleanup(tsd_t *tsd) {
 	}
 }
 
+/* 获取线程的prof_active状态 */
 bool
 prof_active_get(tsdn_t *tsdn) {
 	bool prof_active_current;
@@ -2406,6 +2511,7 @@ prof_active_get(tsdn_t *tsdn) {
 	return prof_active_current;
 }
 
+/* 设置prof_active选项,是否启用prof */
 bool
 prof_active_set(tsdn_t *tsdn, bool active) {
 	bool prof_active_old;

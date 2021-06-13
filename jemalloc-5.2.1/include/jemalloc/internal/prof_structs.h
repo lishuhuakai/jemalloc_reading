@@ -6,10 +6,11 @@
 #include "jemalloc/internal/prng.h"
 #include "jemalloc/internal/rb.h"
 
+/* 记录回溯的堆栈 */
 struct prof_bt_s {
 	/* Backtrace, stored as len program counters. */
-	void		**vec;
-	unsigned	len;
+	void		**vec;  /* 每一层地址 */
+	unsigned	len;    /* 层数 */
 };
 
 #ifdef JEMALLOC_PROF_LIBGCC
@@ -23,7 +24,7 @@ typedef struct {
 struct prof_accum_s {
 #ifndef JEMALLOC_ATOMIC_U64
 	malloc_mutex_t	mtx;
-	uint64_t	accumbytes;
+	uint64_t	accumbytes; /* 累计分配了多少字节 */
 #else
 	atomic_u64_t	accumbytes;
 #endif
@@ -31,22 +32,23 @@ struct prof_accum_s {
 
 struct prof_cnt_s {
 	/* Profiling counters. */
-	uint64_t	curobjs;
-	uint64_t	curbytes;
-	uint64_t	accumobjs;
-	uint64_t	accumbytes;
+	uint64_t	curobjs;     /* 分配的object的数目 */
+	uint64_t	curbytes;    /* 分配的字节数 */
+	uint64_t	accumobjs;   /* 累计分配的object的数目 */
+	uint64_t	accumbytes; /* 累计分配的字节数 */
 };
 
 typedef enum {
-	prof_tctx_state_initializing,
+	prof_tctx_state_initializing, /* 有一个线程正在初始化这个结构 */
 	prof_tctx_state_nominal,
 	prof_tctx_state_dumping,
 	prof_tctx_state_purgatory /* Dumper must finish destroying. */
 } prof_tctx_state_t;
 
+/* prof thread context */
 struct prof_tctx_s {
 	/* Thread data for thread that performed the allocation. */
-	prof_tdata_t		*tdata;
+	prof_tdata_t		*tdata; /* 执行分配操作的线程的thread data */
 
 	/*
 	 * Copy of tdata->thr_{uid,discrim}, necessary because tdata may be
@@ -96,6 +98,7 @@ struct prof_tctx_s {
 };
 typedef rb_tree(prof_tctx_t) prof_tctx_tree_t;
 
+/* prof global context */
 struct prof_gctx_s {
 	/* Protects nlimbo, cnt_summed, and tctxs. */
 	malloc_mutex_t		*lock;
@@ -110,28 +113,30 @@ struct prof_gctx_s {
 	 * nlimbo must be 1 (single destroyer) in order to safely destroy the
 	 * gctx.
 	 */
-	unsigned		nlimbo;
+	/* limbo -- 处于不定的状态 */
+	unsigned		nlimbo; /* 由于是多线程,nlimbo类似于引用计数 */
 
 	/*
 	 * Tree of profile counters, one for each thread that has allocated in
 	 * this context.
 	 */
-	prof_tctx_tree_t	tctxs;
+	prof_tctx_tree_t	tctxs; /* 这里事实上是一颗红黑树,记录了每个线程的分配信息 */
 
 	/* Linkage for tree of contexts to be dumped. */
 	rb_node(prof_gctx_t)	dump_link;
 
 	/* Temporary storage for summation during dump. */
-	prof_cnt_t		cnt_summed;
+	prof_cnt_t		cnt_summed; /* 临时变量,主要用于统计分配了多少字节,多少object */
 
 	/* Associated backtrace. */
-	prof_bt_t		bt;
+	prof_bt_t		bt; /* 记录下对应的堆栈信息 */
 
 	/* Backtrace vector, variable size, referred to by bt. */
 	void			*vec[1];
 };
 typedef rb_tree(prof_gctx_t) prof_gctx_tree_t;
 
+/* 线程的prof信息 */
 struct prof_tdata_s {
 	malloc_mutex_t		*lock;
 
@@ -165,7 +170,7 @@ struct prof_tdata_s {
 	 * associated with thread-specific prof_tctx_t objects.  Other threads
 	 * may write to prof_tctx_t contents when freeing associated objects.
 	 */
-	ckh_t			bt2tctx;
+	ckh_t			bt2tctx; /* hash表,key (prof_bt_t *), val(prof_tctx_t) */
 
 	/* Sampling state. */
 	uint64_t		prng_state;

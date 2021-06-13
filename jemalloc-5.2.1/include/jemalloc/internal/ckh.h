@@ -25,12 +25,14 @@ typedef void ckh_hash_t (const void *, size_t[2]);
 typedef bool ckh_keycomp_t (const void *, const void *);
 
 /* Hash table cell. */
+/* hash表元素 */
 typedef struct {
 	const void *key;
 	const void *data;
 } ckhc_t;
 
 /* The hash table itself. */
+/* hash表 */
 typedef struct {
 #ifdef CKH_COUNT
 	/* Counters used to get an idea of performance. */

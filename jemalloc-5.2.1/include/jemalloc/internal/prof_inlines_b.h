@@ -155,8 +155,8 @@ prof_alloc_prep(tsd_t *tsd, size_t usize, bool prof_active, bool update) {
 		ret = (prof_tctx_t *)(uintptr_t)1U;
 	} else {
 		bt_init(&bt, tdata->vec);
-		prof_backtrace(&bt);
-		ret = prof_lookup(tsd, &bt);
+		prof_backtrace(&bt); /* 通过回溯获得堆栈信息 */
+		ret = prof_lookup(tsd, &bt); /* 然后查找 */
 	}
 
 	return ret;

@@ -2131,7 +2131,7 @@ imalloc_body(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd) {
 	}
 
 	/* If profiling is on, get our profiling context. */
-	if (config_prof && opt_prof) {
+	if (config_prof && opt_prof) { /* 内存分配,要记录堆栈 */
 		/*
 		 * Note that if we're going down this path, usize must have been
 		 * initialized in the previous if statement.
@@ -3307,6 +3307,7 @@ je_rallocx(void *ptr, size_t size, int flags) {
 
 	hook_ralloc_args_t hook_args = {false, {(uintptr_t)ptr, size, flags,
 		0}};
+    /* 如果开启了prof功能 */
 	if (config_prof && opt_prof) {
 		usize = (alignment == 0) ?
 		    sz_s2u(size) : sz_sa2u(size, alignment);

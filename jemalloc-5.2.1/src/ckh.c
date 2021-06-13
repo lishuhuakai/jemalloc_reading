@@ -356,6 +356,11 @@ ckh_shrink(tsd_t *tsd, ckh_t *ckh) {
 #endif
 }
 
+/* 创建一个hash表
+ * @parma minitems 最少的元素个数
+ * @param hash hash函数
+ * @param keycomp key比较函数
+ */
 bool
 ckh_new(tsd_t *tsd, ckh_t *ckh, size_t minitems, ckh_hash_t *hash,
     ckh_keycomp_t *keycomp) {
@@ -402,7 +407,7 @@ ckh_new(tsd_t *tsd, ckh_t *ckh, size_t minitems, ckh_hash_t *hash,
 		goto label_return;
 	}
 	ckh->tab = (ckhc_t *)ipallocztm(tsd_tsdn(tsd), usize, CACHELINE, true,
-	    NULL, true, arena_ichoose(tsd, NULL));
+	    NULL, true, arena_ichoose(tsd, NULL)); /* tab分配实际内存 */
 	if (ckh->tab == NULL) {
 		ret = true;
 		goto label_return;
@@ -435,6 +440,7 @@ ckh_delete(tsd_t *tsd, ckh_t *ckh) {
 	}
 }
 
+/* 获得hash表中元素的个数 */
 size_t
 ckh_count(ckh_t *ckh) {
 	assert(ckh != NULL);
@@ -442,6 +448,7 @@ ckh_count(ckh_t *ckh) {
 	return ckh->count;
 }
 
+/* 迭代,遍历所有的元素 */
 bool
 ckh_iter(ckh_t *ckh, size_t *tabind, void **key, void **data) {
 	size_t i, ncells;
@@ -449,6 +456,7 @@ ckh_iter(ckh_t *ckh, size_t *tabind, void **key, void **data) {
 	for (i = *tabind, ncells = (ZU(1) << (ckh->lg_curbuckets +
 	    LG_CKH_BUCKET_CELLS)); i < ncells; i++) {
 		if (ckh->tab[i].key != NULL) {
+            /* 将key- value拷贝出去 */
 			if (key != NULL) {
 				*key = (void *)ckh->tab[i].key;
 			}
@@ -463,6 +471,7 @@ ckh_iter(ckh_t *ckh, size_t *tabind, void **key, void **data) {
 	return true;
 }
 
+/* 往hash表中插入元素 */
 bool
 ckh_insert(tsd_t *tsd, ckh_t *ckh, const void *key, const void *data) {
 	bool ret;
@@ -519,6 +528,9 @@ ckh_remove(tsd_t *tsd, ckh_t *ckh, const void *searchkey, void **key,
 	return true;
 }
 
+/* 在hash表中进行查找
+ * 如果查找到了,返回false,否则返回true
+ */
 bool
 ckh_search(ckh_t *ckh, const void *searchkey, void **key, void **data) {
 	size_t cell;
