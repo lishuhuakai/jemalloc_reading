@@ -162,6 +162,7 @@ extent_before_get(const extent_t *extent) {
 	return (void *)((uintptr_t)extent_base_get(extent) - PAGE);
 }
 
+/* 获取extent的尾部地址 */
 static inline void *
 extent_last_get(const extent_t *extent) {
 	return (void *)((uintptr_t)extent_base_get(extent) +
@@ -299,6 +300,7 @@ extent_nfree_dec(extent_t *extent) {
 	extent->e_bits -= ((uint64_t)1U << EXTENT_BITS_NFREE_SHIFT);
 }
 
+/* 将空闲的region个数减掉n */
 static inline void
 extent_nfree_sub(extent_t *extent, uint64_t n) {
 	assert(extent_slab_get(extent));

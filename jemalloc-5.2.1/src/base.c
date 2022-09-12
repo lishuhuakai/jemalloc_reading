@@ -7,7 +7,7 @@
 #include "jemalloc/internal/mutex.h"
 #include "jemalloc/internal/sz.h"
 
-/* ¹ØÓÚbase, ÕâÊÇjemallocÄÚ²¿Ê¹ÓÃµÄÄÚ´æ·ÖÅäÆ÷  */
+/* å…³äºbase, è¿™æ˜¯jemallocå†…éƒ¨ä½¿ç”¨çš„å†…å­˜åˆ†é…å™¨  */
 /******************************************************************************/
 /* Data. */
 
@@ -29,7 +29,7 @@ metadata_thp_madvise(void) {
 	    (init_system_thp_mode == thp_mode_default));
 }
 
-/* ÄÚ´æ·ÖÅä */
+/* å†…å­˜åˆ†é… */
 static void *
 base_map(tsdn_t *tsdn, extent_hooks_t *extent_hooks, unsigned ind, size_t size) {
 	void *addr;
@@ -117,7 +117,7 @@ label_done:
 	}
 }
 
-/* ³õÊ¼»¯extent
+/* åˆå§‹åŒ–extent
  */
 static void
 base_extent_init(size_t *extent_sn_next, extent_t *extent, void *addr,
@@ -180,8 +180,8 @@ base_auto_thp_switch(tsdn_t *tsdn, base_t *base) {
 	}
 }
 
-/* ´ÓextentÖĞ·ÖÅäÄÚ´æ
- * @return ·µ»Ø·ÖÅäºóµÄÄÚ´æÊ×µØÖ·
+/* ä»extentä¸­åˆ†é…å†…å­˜
+ * @return è¿”å›åˆ†é…åçš„å†…å­˜é¦–åœ°å€
  */
 static void *
 base_extent_bump_alloc_helper(extent_t *extent, size_t *gap_size, size_t size,
@@ -190,13 +190,13 @@ base_extent_bump_alloc_helper(extent_t *extent, size_t *gap_size, size_t size,
 
 	assert(alignment == ALIGNMENT_CEILING(alignment, QUANTUM));
 	assert(size == ALIGNMENT_CEILING(size, alignment));
-    /* ¿ÕÏ¶´óĞ¡ */
+    /* ç©ºéš™å¤§å° */
 	*gap_size = ALIGNMENT_CEILING((uintptr_t)extent_addr_get(extent),
 	    alignment) - (uintptr_t)extent_addr_get(extent);
-    /* retÊÇ¶ÔÆëºóµÄÊ×µØÖ· */
+    /* retæ˜¯å¯¹é½åçš„é¦–åœ°å€ */
 	ret = (void *)((uintptr_t)extent_addr_get(extent) + *gap_size);
 	assert(extent_bsize_get(extent) >= *gap_size + size);
-    /* ÄÚ´æ·ÖÅäÍê³ÉÖ®ºó,ĞèÒª¸üĞÂÔªÊı¾İ */
+    /* å†…å­˜åˆ†é…å®Œæˆä¹‹å,éœ€è¦æ›´æ–°å…ƒæ•°æ® */
 	extent_binit(extent, (void *)((uintptr_t)extent_addr_get(extent) +
 	    *gap_size + size), extent_bsize_get(extent) - *gap_size - size,
 	    extent_sn_get(extent));
@@ -216,10 +216,10 @@ base_extent_bump_alloc_post(base_t *base, extent_t *extent, size_t gap_size,
 		 */
 		szind_t index_floor =
 		    sz_size2index(extent_bsize_get(extent) + 1) - 1;
-        /* ½«extent²åÈëÁ´±í */
+        /* å°†extentæ’å…¥é“¾è¡¨ */
 		extent_heap_insert(&base->avail[index_floor], extent);
 	}
-    /* ¸üĞÂÍ³¼ÆĞÅÏ¢ */
+    /* æ›´æ–°ç»Ÿè®¡ä¿¡æ¯ */
 	if (config_stats) {
 		base->allocated += size;
 		/*
@@ -258,17 +258,17 @@ base_extent_bump_alloc(base_t *base, extent_t *extent, size_t size,
  * base_block_t header, followed by an object of specified size and alignment.
  * On success a pointer to the initialized base_block_t header is returned.
  */
-/* ·ÖÅäbase_block
- * @param size ÄÚ´æ¿é´óĞ¡
- * @param alignment ¶ÔÆë
+/* åˆ†é…base_block
+ * @param size å†…å­˜å—å¤§å°
+ * @param alignment å¯¹é½
  */
 static base_block_t *
 base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
     unsigned ind, pszind_t *pind_last, size_t *extent_sn_next, size_t size,
     size_t alignment) {
 	alignment = ALIGNMENT_CEILING(alignment, QUANTUM);
-	size_t usize = ALIGNMENT_CEILING(size, alignment); /* ¶ÔÆëºóµÄ´óĞ¡ */
-	size_t header_size = sizeof(base_block_t); /* ÔªÊı¾İ,Í·²¿´óĞ¡ */
+	size_t usize = ALIGNMENT_CEILING(size, alignment); /* å¯¹é½åçš„å¤§å° */
+	size_t header_size = sizeof(base_block_t); /* å…ƒæ•°æ®,å¤´éƒ¨å¤§å° */
 	size_t gap_size = ALIGNMENT_CEILING(header_size, alignment) -
 	    header_size;
 	/*
@@ -279,14 +279,14 @@ base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
 	 * alignment, whichever is larger.
 	 */
 	size_t min_block_size = HUGEPAGE_CEILING(sz_psz2u(header_size + gap_size
-	    + usize)); /* ÖÁÉÙÒª·ÖÅäÕâÃ´¶à×Ö½Ú */
+	    + usize)); /* è‡³å°‘è¦åˆ†é…è¿™ä¹ˆå¤šå­—èŠ‚ */
 	pszind_t pind_next = (*pind_last + 1 < sz_psz2ind(SC_LARGE_MAXCLASS)) ?
 	    *pind_last + 1 : *pind_last;
 	size_t next_block_size = HUGEPAGE_CEILING(sz_pind2sz(pind_next));
-    /* ¼ÆËãÊµ¼ÊÒª·ÖÅäµÄÄÚ´æ¿éµÄ´óĞ¡ */
+    /* è®¡ç®—å®é™…è¦åˆ†é…çš„å†…å­˜å—çš„å¤§å° */
 	size_t block_size = (min_block_size > next_block_size) ? min_block_size
 	    : next_block_size;
-    /* ÄÚ´æ·ÖÅä,×¢ÒâÕâÀïµÄÄÚ´æ·ÖÅä,Í·²¿ÒÑ¾­¼ÆËãÔÚblock_sizeÖĞÁË */
+    /* å†…å­˜åˆ†é…,æ³¨æ„è¿™é‡Œçš„å†…å­˜åˆ†é…,å¤´éƒ¨å·²ç»è®¡ç®—åœ¨block_sizeä¸­äº† */
 	base_block_t *block = (base_block_t *)base_map(tsdn, extent_hooks, ind,
 	    block_size);
 	if (block == NULL) {
@@ -312,10 +312,10 @@ base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
 	}
 
 	*pind_last = sz_psz2ind(block_size);
-	block->size = block_size; /* ¼ÇÂ¼ÏÂ´óĞ¡ */
+	block->size = block_size; /* è®°å½•ä¸‹å¤§å° */
 	block->next = NULL;
 	assert(block_size >= header_size);
-    /* ³õÊ¼»¯block->extent */
+    /* åˆå§‹åŒ–block->extent */
 	base_extent_init(extent_sn_next, &block->extent,
 	    (void *)((uintptr_t)block + header_size), block_size - header_size);
 	return block;
@@ -325,7 +325,7 @@ base_block_alloc(tsdn_t *tsdn, base_t *base, extent_hooks_t *extent_hooks,
  * Allocate an extent that is at least as large as specified size, with
  * specified alignment.
  */
-/* ·ÖÅäÒ»¸öextent,ËüÖÁÉÙÓĞsize´óĞ¡,ÒÔ¼°Ö¸¶¨µÄ¶ÔÆë·½Ê½
+/* åˆ†é…ä¸€ä¸ªextent,å®ƒè‡³å°‘æœ‰sizeå¤§å°,ä»¥åŠæŒ‡å®šçš„å¯¹é½æ–¹å¼
  *
  */
 static extent_t *
@@ -345,7 +345,7 @@ base_extent_alloc(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment) {
 	if (block == NULL) {
 		return NULL;
 	}
-    /* ½«block¼ÓÈëbase->blocksÁ´±íÖĞ */
+    /* å°†blockåŠ å…¥base->blocksé“¾è¡¨ä¸­ */
 	block->next = base->blocks;
 	base->blocks = block;
 	if (config_stats) {
@@ -371,14 +371,14 @@ b0get(void) {
 	return b0;
 }
 
-/* ´´½¨Ò»¸öĞÂµÄbase½á¹¹
+/* åˆ›å»ºä¸€ä¸ªæ–°çš„baseç»“æ„
  *
  */
 base_t *
 base_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 	pszind_t pind_last = 0;
 	size_t extent_sn_next = 0;
-    /* Ê×ÏÈ´´½¨Ò»¸öbase_block½á¹¹ */
+    /* é¦–å…ˆåˆ›å»ºä¸€ä¸ªbase_blockç»“æ„ */
 	base_block_t *block = base_block_alloc(tsdn, NULL, extent_hooks, ind,
 	    &pind_last, &extent_sn_next, sizeof(base_t), QUANTUM);
 	if (block == NULL) {
@@ -388,7 +388,7 @@ base_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 	size_t gap_size;
 	size_t base_alignment = CACHELINE;
 	size_t base_size = ALIGNMENT_CEILING(sizeof(base_t), base_alignment);
-    /* ´Óbase_block½á¹¹ÖĞ·ÖÅäÒ»¸öbase */
+    /* ä»base_blockç»“æ„ä¸­åˆ†é…ä¸€ä¸ªbase */
 	base_t *base = (base_t *)base_extent_bump_alloc_helper(&block->extent,
 	    &gap_size, base_size, base_alignment);
 	base->ind = ind;
@@ -416,14 +416,14 @@ base_new(tsdn_t *tsdn, unsigned ind, extent_hooks_t *extent_hooks) {
 		assert(base->resident <= base->mapped);
 		assert(base->n_thp << LG_HUGEPAGE <= base->mapped);
 	}
-    /* ½«base_block->extentºÍbaseÁªÏµÆğÀ´ */
+    /* å°†base_block->extentå’Œbaseè”ç³»èµ·æ¥ */
 	base_extent_bump_alloc_post(base, &block->extent, gap_size, base,
 	    base_size);
 
 	return base;
 }
 
-/* ÒÆ³ıbase
+/* ç§»é™¤base
  *
  */
 void
@@ -433,7 +433,7 @@ base_delete(tsdn_t *tsdn, base_t *base) {
 	do {
 		base_block_t *block = next;
 		next = block->next;
-        /* ²»Í£Ïú»ÙµôbaseËù¹ÜÀíµÄbase_block */
+        /* ä¸åœé”€æ¯æ‰baseæ‰€ç®¡ç†çš„base_block */
 		base_unmap(tsdn, extent_hooks, base_ind_get(base), block,
 		    block->size);
 	} while (next != NULL);
@@ -452,15 +452,15 @@ base_extent_hooks_set(base_t *base, extent_hooks_t *extent_hooks) {
 	return old_extent_hooks;
 }
 
-/* Í¨¹ıbaseÀ´·ÖÅäÄÚ´æ
- * @param size ÄÚ´æ¿é´óĞ¡
+/* é€šè¿‡baseæ¥åˆ†é…å†…å­˜
+ * @param size å†…å­˜å—å¤§å°
  */
 static void *
 base_alloc_impl(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment,
     size_t *esn) {
 	alignment = QUANTUM_CEILING(alignment);
 	size_t usize = ALIGNMENT_CEILING(size, alignment);
-	size_t asize = usize + alignment - QUANTUM; /* Êµ¼Ê´óĞ¡ */
+	size_t asize = usize + alignment - QUANTUM; /* å®é™…å¤§å° */
 
 	extent_t *extent = NULL;
 	malloc_mutex_lock(tsdn, &base->mtx);
@@ -472,7 +472,7 @@ base_alloc_impl(tsdn_t *tsdn, base_t *base, size_t size, size_t alignment,
 			break;
 		}
 	}
-	if (extent == NULL) { /* Èç¹ûÃ»ÓĞÕÒµ½¿ÉÓÃµÄextent,¾ÍĞèÒªÖØĞÂ·ÖÅä */
+	if (extent == NULL) { /* å¦‚æœæ²¡æœ‰æ‰¾åˆ°å¯ç”¨çš„extent,å°±éœ€è¦é‡æ–°åˆ†é… */
 		/* Try to allocate more space. */
 		extent = base_extent_alloc(tsdn, base, usize, alignment);
 	}

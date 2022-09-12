@@ -399,6 +399,7 @@ tsdn_fetch(void) {
 	return tsd_tsdn(tsd_fetch_impl(false, false));
 }
 
+/* 获取本线程中的rtree查找缓存 */
 JEMALLOC_ALWAYS_INLINE rtree_ctx_t *
 tsd_rtree_ctx(tsd_t *tsd) {
 	return tsd_rtree_ctxp_get(tsd);

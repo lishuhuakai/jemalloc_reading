@@ -1,0 +1,495 @@
+# 1. 结构体定义
+
+## 1.1 sc_data
+
+sc_data这个结构体主要用来描述size class的信息.
+
+```c
+typedef struct sc_data_s sc_data_t;
+struct sc_data_s {
+	/* Number of tiny size classes. */
+	unsigned ntiny; /* tiny size classes的个数 */
+	/* Number of bins supported by the lookup table. */
+	int nlbins;
+	/* Number of small size class bins. */
+	int nbins;
+	/* Number of size classes. */
+	int nsizes;
+	/* Number of bits required to store NSIZES. */
+	int lg_ceil_nsizes;
+	/* Number of size classes that are a multiple of (1U << LG_PAGE). */
+	unsigned npsizes;
+	/* Lg of maximum tiny size class (or -1, if none). */
+	int lg_tiny_maxclass;
+	/* Maximum size class included in lookup table. */
+	size_t lookup_maxclass;
+	/* Maximum small size class. */
+	size_t small_maxclass;
+	/* Lg of minimum large size class. */
+	int lg_large_minclass;
+	/* The minimum large size class. */
+	size_t large_minclass;
+	/* Maximum (large) size class. */
+	size_t large_maxclass;
+	/* True if the sc_data_t has been initialized (for debugging only). */
+	bool initialized;
+
+	sc_t sc[SC_NSIZES];
+};
+```
+
+## 1.2 sc
+
+size class
+
+```c
+typedef struct sc_s sc_t;
+struct sc_s {
+    /* 1 << lg_base + ndelta << lg_delta为size class所描述的一类内存的大小 */
+	/* Size class index, or -1 if not a valid size class. */
+	int index; /* size class的index值 */
+	/* Lg group base size (no deltas added). */
+	int lg_base;
+	/* Lg delta to previous size class. */
+	int lg_delta; /* 增量 */
+	/* Delta multiplier.  size == 1<<lg_base + ndelta<<lg_delta */
+	int ndelta;
+	/*
+	 * True if the size class is a multiple of the page size, false
+	 * otherwise.
+	 */
+	bool psz; /* 如果size class是page size的整数倍 */
+	/*
+	 * True if the size class is a small, bin, size class. False otherwise.
+	 */
+	bool bin;
+	/* The slab page count if a small bin size class, 0 otherwise. */
+	int pgs; /* 如果slab中的内存全部切割成size_class的大小,那么slab中包含的页的数量应该为pgs的整数倍,才能保证内存充分利用 */
+	/* Same as lg_delta if a lookup table size class, 0 otherwise. */
+	int lg_delta_lookup;
+};
+```
+
+
+
+# 2. 相关函数
+
+## 2.1 size class的初始化
+
+```c
+/*
+ * This module computes the size classes used to satisfy allocations.  The logic
+ * here was ported more or less line-by-line from a shell script, and because of
+ * that is not the most idiomatic C.  Eventually we should fix this, but for now
+ * at least the damage is compartmentalized to this file.
+ */
+sc_data_t sc_data_global;
+
+/* 计算size class的大小 */
+static size_t
+reg_size_compute(int lg_base, int lg_delta, int ndelta) {
+	return (ZU(1) << lg_base) + (ZU(ndelta) << lg_delta);
+}
+
+/*
+ * 如果一个slab全部用于分配size class的大小的内存,那么slab中包含的page的个数要为该函数的返回值的整数倍.
+ * 才能保证slab中不存在浪费的内存
+ * @param lg_base
+ */
+static int
+slab_size(int lg_page, int lg_base, int lg_delta, int ndelta) {
+	size_t page = (ZU(1) << lg_page); /* 一页的大小 */
+	size_t reg_size = reg_size_compute(lg_base, lg_delta, ndelta); /* size class的大小 */
+
+	size_t try_slab_size = page;
+	size_t try_nregs = try_slab_size / reg_size; /* 计算一页能分配多少个 */
+	size_t perfect_slab_size = 0;
+	bool perfect = false;
+	/*
+	 * This loop continues until we find the least common multiple of the
+	 * page size and size class size.  Size classes are all of the form
+	 * base + ndelta * delta == (ndelta + base/ndelta) * delta, which is
+	 * (ndelta + ngroup) * delta.  The way we choose slabbing strategies
+	 * means that delta is at most the page size and ndelta < ngroup.  So
+	 * the loop executes for at most 2 * ngroup - 1 iterations, which is
+	 * also the bound on the number of pages in a slab chosen by default.
+	 * With the current default settings, this is at most 7.
+	 */
+	while (!perfect) {
+		perfect_slab_size = try_slab_size;
+		size_t perfect_nregs = try_nregs;
+		try_slab_size += page; /* 增加1页 */
+		try_nregs = try_slab_size / reg_size;
+		if (perfect_slab_size == perfect_nregs * reg_size) { /* 保证能恰好完全分配(整除) */
+			perfect = true;
+		}
+	}
+	return (int)(perfect_slab_size / page);
+}
+
+/* 初始化size class */
+static void
+size_class(
+    /* Output. */
+    sc_t *sc, /* 待初始化的结构 */
+    /* Configuration decisions. */
+    int lg_max_lookup, /* 2^lg_max_lookup -- 大小小于这个值的分配请求,都可以快速索引到index,一般为12 */
+    int lg_page,    /* 2^lg_page为页的大小 */
+    int lg_ngroup, /* 2^lg_ngroup为组的个数 */
+    /* Inputs specific to the size class. */
+    int index,    /* 此sc在sc数组中的下标 */
+    int lg_base,
+    int lg_delta,
+    int ndelta) { /* 如果是tiny size class,ndelta为0  */
+	sc->index = index;
+	sc->lg_base = lg_base;
+	sc->lg_delta = lg_delta; /* group内偏移量指数 */
+	sc->ndelta = ndelta;      /* group内偏移数 */
+    /* 判断size class的大小是否为页大小的倍数 */
+	sc->psz = (reg_size_compute(lg_base, lg_delta, ndelta) % (ZU(1) << lg_page) == 0);
+	size_t size = (ZU(1) << lg_base) + (ZU(ndelta) << lg_delta); /* size class的大小 */
+	if (index == 0) {
+		assert(!sc->psz);
+	}
+	if (size < (ZU(1) << (lg_page + lg_ngroup))) {
+		sc->bin = true; /* 表示size class很小 */
+		sc->pgs = slab_size(lg_page, lg_base, lg_delta, ndelta);
+	} else {
+		sc->bin = false;
+		sc->pgs = 0;
+	}
+	if (size <= (ZU(1) << lg_max_lookup)) { /* 如果size class的大小很小,达不到2^lg_max_lookup */
+		sc->lg_delta_lookup = lg_delta; /* 可以直接通过lg_delta索引 */
+	} else {
+		sc->lg_delta_lookup = 0;
+	}
+}
+
+static void
+size_classes(
+    /* Output. */
+    sc_data_t *sc_data, /* 初始化sc_data */
+    /* Determined by the system. */
+    size_t lg_ptr_size,  /* 2^lg_ptr_size 为指针大小 */
+    int lg_quantum,      /* 2^lg_quantum -- 一般平台要求的对齐字节数, 一般lg_quantum为4 */
+    /* Configuration decisions. */
+    int lg_tiny_min,   /* 2^lg_tiny_min -- 平台所支持的,最小的分配字节数 */
+    int lg_max_lookup, /* size小于2^lg_max_lookup的,都可以通过空间换时间的方式,获取到索引,一般为12 */
+    int lg_page,        /* 2^lg_page为页大小 */
+    int lg_ngroup) {    /* 2^lg_ngroup为组的个数,一般lg_ngroup为2 */
+	int ptr_bits = (1 << lg_ptr_size) * 8; /* 指针所占用的bit数目 */
+	int ngroup = (1 << lg_ngroup); /* 组的个数,一般为4 */
+	int ntiny = 0;  /* tiny size classes的个数 */
+	int nlbins = 0;
+	int lg_tiny_maxclass = (unsigned)-1;
+	int nbins = 0;
+	int npsizes = 0;
+
+	int index = 0;
+
+	int ndelta = 0;
+	int lg_base = lg_tiny_min; /* 64位系统下,lg_tiny_min为3 */
+	int lg_delta = lg_base;
+
+	/* Outputs that we update as we go. */
+	size_t lookup_maxclass = 0;
+	size_t small_maxclass = 0;
+	int lg_large_minclass = 0;
+	size_t large_maxclass = 0;
+
+	/* Tiny size classes. */
+	while (lg_base < lg_quantum) { /* 这里假定一下,lg_base为3, lg_quantum为4 */
+		sc_t *sc = &sc_data->sc[index];
+        /* 不停地初始化sc
+         * tiny class的ndelta始终为0
+         * lg_delta为3, lg_base为3
+         * lg_max_lookup一般为12
+         */
+		size_class(sc, lg_max_lookup, lg_page, lg_ngroup, index, lg_base, lg_delta, ndelta);
+		if (sc->lg_delta_lookup != 0) { /* 可以直接通过lg_delta_lookup来索引 */
+			nlbins = index + 1;
+		}
+		if (sc->psz) { /* sz->psz表示szie class是page size的整数倍 */
+			npsizes++;
+		}
+		if (sc->bin) {
+			nbins++;
+		}
+		ntiny++;
+		/* Final written value is correct. */
+		lg_tiny_maxclass = lg_base;
+		index++;
+		lg_delta = lg_base;
+		lg_base++;
+/* size_class大小为2^3=8
+ * {index = 0, lg_base = 3, lg_delta = 3, ndelta = 0, psz = false, bin = true, pgs = 1, lg_delta_lookup = 3} 
+ */
+	}
+	/* 64位系统下,lg_tiny_maxclass一般为3 */
+	/* First non-tiny (pseudo) group. */
+	if (ntiny != 0) {
+		sc_t *sc = &sc_data->sc[index];
+		/*
+		 * See the note in sc.h; the first non-tiny size class has an
+		 * unusual encoding.
+		 */
+		lg_base--;
+		ndelta = 1; /* 这里的ndelta改变了值,其余值都不变 */
+		size_class(sc, lg_max_lookup, lg_page, lg_ngroup, index, lg_base, lg_delta, ndelta);
+		index++;
+		lg_base++;
+		lg_delta++;
+		if (sc->psz) {
+			npsizes++;
+		}
+		if (sc->bin) {
+			nbins++;
+		}
+/*  size_class大小为2^3 + 1 << 3= 8 + 8 = 16字节
+ * {index = 1, lg_base = 3, lg_delta = 3, ndelta = 1, psz = false, bin = true, pgs = 1, lg_delta_lookup = 3}
+ */
+	}
+
+	while (ndelta < ngroup) {
+		sc_t *sc = &sc_data->sc[index];
+		size_class(sc, lg_max_lookup, lg_page, lg_ngroup, index, lg_base, lg_delta, ndelta);
+		index++;
+		ndelta++;
+		if (sc->psz) {
+			npsizes++;
+		}
+		if (sc->bin) {
+			nbins++;
+		}
+/* size_class大小为2^4+1<<4=16+16=32字节
+ * {index = 2, lg_base = 4, lg_delta = 4, ndelta = 1, psz = false, bin = true, pgs = 1, lg_delta_lookup = 4}
+ * size_class大小为2^4+2<<4=16*3=48字节
+ * {index = 3, lg_base = 4, lg_delta = 4, ndelta = 2, psz = false, bin = true, pgs = 3, lg_delta_lookup = 4}
+ * 16*4=64
+ * {index = 4, lg_base = 4, lg_delta = 4, ndelta = 3, psz = false, bin = true, pgs = 1, lg_delta_lookup = 4}
+ */
+	}
+
+	/* All remaining groups. */
+    /* 全部剩余的group */
+	lg_base = lg_base + lg_ngroup;
+	while (lg_base < ptr_bits - 1) {
+		ndelta = 1;
+		int ndelta_limit;
+		if (lg_base == ptr_bits - 2) {
+			ndelta_limit = ngroup - 1;
+		} else {
+			ndelta_limit = ngroup;
+		}
+		while (ndelta <= ndelta_limit) {
+			sc_t *sc = &sc_data->sc[index];
+			size_class(sc, lg_max_lookup, lg_page, lg_ngroup, index, lg_base, lg_delta, ndelta);
+			if (sc->lg_delta_lookup != 0) {
+				nlbins = index + 1;
+				/* Final written value is correct. */
+				lookup_maxclass = (ZU(1) << lg_base) + (ZU(ndelta) << lg_delta);
+			}
+			if (sc->psz) {
+				npsizes++;
+			}
+			if (sc->bin) {
+				nbins++;
+				/* Final written value is correct. */
+				small_maxclass = (ZU(1) << lg_base) + (ZU(ndelta) << lg_delta);
+				if (lg_ngroup > 0) {
+					lg_large_minclass = lg_base + 1;
+				} else {
+					lg_large_minclass = lg_base + 2;
+				}
+			}
+			large_maxclass = (ZU(1) << lg_base) + (ZU(ndelta) << lg_delta);
+			index++;
+			ndelta++; /* 组内偏移 */
+		}
+		lg_base++; /* 这里每一次只是增加1 */
+		lg_delta++;
+	}
+/* 64位系统下的例子:
+ * 2^6 + 1<<4 = ... 
+ * {index = 5, lg_base = 6, lg_delta = 4, ndelta = 1, psz = false, bin = true, pgs = 5, lg_delta_lookup = 4}
+ * {index = 6, lg_base = 6, lg_delta = 4, ndelta = 2, psz = false, bin = true, pgs = 3, lg_delta_lookup = 4}
+ * {index = 7, lg_base = 6, lg_delta = 4, ndelta = 3, psz = false, bin = true, pgs = 7, lg_delta_lookup = 4}
+ * {index = 8, lg_base = 6, lg_delta = 4, ndelta = 4, psz = false, bin = true, pgs = 1, lg_delta_lookup = 4}
+ * {index = 9, lg_base = 7, lg_delta = 5, ndelta = 1, psz = false, bin = true, pgs = 5, lg_delta_lookup = 5}
+ * {index = 10, lg_base = 7, lg_delta = 5, ndelta = 2, psz = false, bin = true, pgs = 3, lg_delta_lookup = 5}
+ * {index = 11, lg_base = 7, lg_delta = 5, ndelta = 3, psz = false, bin = true, pgs = 7, lg_delta_lookup = 5}
+ * {index = 12, lg_base = 7, lg_delta = 5, ndelta = 4, psz = false, bin = true, pgs = 1, lg_delta_lookup = 5}
+ * {index = 13, lg_base = 8, lg_delta = 6, ndelta = 1, psz = false, bin = true, pgs = 5, lg_delta_lookup = 6}
+ * ...
+ */
+	/* Additional outputs. */
+	int nsizes = index;
+	unsigned lg_ceil_nsizes = lg_ceil(nsizes);
+
+	/* Fill in the output data. */
+	sc_data->ntiny = ntiny;
+	sc_data->nlbins = nlbins;
+	sc_data->nbins = nbins;
+	sc_data->nsizes = nsizes;
+	sc_data->lg_ceil_nsizes = lg_ceil_nsizes;
+	sc_data->npsizes = npsizes;
+	sc_data->lg_tiny_maxclass = lg_tiny_maxclass;
+	sc_data->lookup_maxclass = lookup_maxclass;
+	sc_data->small_maxclass = small_maxclass;
+	sc_data->lg_large_minclass = lg_large_minclass;
+	sc_data->large_minclass = (ZU(1) << lg_large_minclass);
+	sc_data->large_maxclass = large_maxclass;
+}
+
+/* size class相关数据的初始化 */
+void
+sc_data_init(sc_data_t *sc_data) {
+	int lg_max_lookup = 12;
+	/*
+	 * LG_SIZEOF_PTR在64位系统下为3
+	 * LG_QUANTUM一般为4
+	 * LG_PAGE一般为12
+	 * SC_LG_TINY_MIN为3
+	 */
+	size_classes(sc_data, LG_SIZEOF_PTR, LG_QUANTUM, SC_LG_TINY_MIN,
+	    lg_max_lookup, LG_PAGE, 2);
+
+	sc_data->initialized = true;
+}
+
+void
+sc_boot(sc_data_t *data) {
+	sc_data_init(data);
+}
+```
+
+## 2.2 size class查找提速
+
+初始化的时候,会调用`sz_boot`来进行初始化,`sz_boot`函数上演了一场空间换时间的游戏.
+
+```c
+/* 以空间换时间,SC_NPSIZES为size class的个数 */
+size_t sz_pind2sz_tab[SC_NPSIZES+1];
+
+static void
+sz_boot_pind2sz_tab(const sc_data_t *sc_data) {
+	int pind = 0;
+	for (unsigned i = 0; i < SC_NSIZES; i++) {
+		const sc_t *sc = &sc_data->sc[i];
+		if (sc->psz) { /* 如果size class的大小为page的整数倍,那么记录下来 */
+			sz_pind2sz_tab[pind] = (ZU(1) << sc->lg_base) + (ZU(sc->ndelta) << sc->lg_delta);
+			pind++;
+		}
+	}
+	for (int i = pind; i <= (int)SC_NPSIZES; i++) {
+		sz_pind2sz_tab[pind] = sc_data->large_maxclass + PAGE;
+	}
+}
+
+/* 通过index,可以直接获得size class的大小 */
+size_t sz_index2size_tab[SC_NSIZES];
+/* 初始化sz_index2size_tab */
+static void
+sz_boot_index2size_tab(const sc_data_t *sc_data) {
+	for (unsigned i = 0; i < SC_NSIZES; i++) {
+		const sc_t *sc = &sc_data->sc[i];
+        /* 记录下size class的大小 */
+		sz_index2size_tab[i] = (ZU(1) << sc->lg_base) + (ZU(sc->ndelta) << (sc->lg_delta));
+	}
+}
+
+/*
+ * To keep this table small, we divide sizes by the tiny min size, which gives
+ * the smallest interval for which the result can change.
+ * 实际来说,如果要分配某种大小的内存(小于512字节),可以通过此数组,快速定位到大小最为接近的size class
+ */
+uint8_t sz_size2index_tab[(SC_LOOKUP_MAXCLASS >> SC_LG_TINY_MIN) + 1]; /* 大小约为512左右 */
+
+/* 初始化sz_size2index_tab */
+static void
+sz_boot_size2index_tab(const sc_data_t *sc_data) {
+	size_t dst_max = (SC_LOOKUP_MAXCLASS >> SC_LG_TINY_MIN) + 1;
+	size_t dst_ind = 0;
+	for (unsigned sc_ind = 0; sc_ind < SC_NSIZES && dst_ind < dst_max; sc_ind++) {
+		const sc_t *sc = &sc_data->sc[sc_ind];
+		size_t sz = (ZU(1) << sc->lg_base) + (ZU(sc->ndelta) << sc->lg_delta); /* size class的大小 */
+		size_t max_ind = ((sz + (ZU(1) << SC_LG_TINY_MIN) - 1) >> SC_LG_TINY_MIN);
+		for (; dst_ind <= max_ind && dst_ind < dst_max; dst_ind++) {
+			sz_size2index_tab[dst_ind] = sc_ind; /* 记录下索引值 */
+		}
+	}
+}
+
+void
+sz_boot(const sc_data_t *sc_data) {
+	sz_boot_pind2sz_tab(sc_data);
+	sz_boot_index2size_tab(sc_data);
+	sz_boot_size2index_tab(sc_data);
+}
+```
+
+正是因为有了这些数组的存在,可以加快size class的查找速度.
+
+### 2.2.1 sz_size2index
+
+给定一个大小,可以快速定位到与大小接近的size class的下标.
+
+```c
+/* 通过大小来计算size class的索引值 */
+static inline szind_t
+sz_size2index_compute(size_t size) {
+	if (unlikely(size > SC_LARGE_MAXCLASS)) {
+		return SC_NSIZES;
+	}
+
+	if (size == 0) {
+		return 0;
+	}
+#if (SC_NTINY != 0)
+	if (size <= (ZU(1) << SC_LG_TINY_MAXCLASS)) {
+        /* 在tiny class中找 */
+		szind_t lg_tmin = SC_LG_TINY_MAXCLASS - SC_NTINY + 1;
+		szind_t lg_ceil = lg_floor(pow2_ceil_zu(size));
+        /* lg_ceil < lg_tmin表示size太小了,直接返回0
+         * 否则返回相对于lg_tmin的偏移量
+         */
+		return (lg_ceil < lg_tmin ? 0 : lg_ceil - lg_tmin);
+	}
+#endif
+	{
+		szind_t x = lg_floor((size<<1)-1); /* 2^x >= size */
+		szind_t shift = (x < SC_LG_NGROUP + LG_QUANTUM) ? 0 :
+		    x - (SC_LG_NGROUP + LG_QUANTUM); /* 偏移量,也就是属于哪一个group */
+		szind_t grp = shift << SC_LG_NGROUP;  /* 每一个group都包含2^SC_LG_NGROUP个size classes */
+		szind_t lg_delta = (x < SC_LG_NGROUP + LG_QUANTUM + 1)
+		    ? LG_QUANTUM : x - SC_LG_NGROUP - 1;
+
+		size_t delta_inverse_mask = ZU(-1) << lg_delta;
+        /* mod计算的是组内的偏移 */
+		szind_t mod = ((((size-1) & delta_inverse_mask) >> lg_delta)) &
+		    ((ZU(1) << SC_LG_NGROUP) - 1);
+        /* 计算得到在sc数组中的偏移 */
+		szind_t index = SC_NTINY + grp + mod;
+		return index;
+	}
+}
+
+szind_t
+sz_size2index_lookup(size_t size) {
+	assert(size <= SC_LOOKUP_MAXCLASS);
+	szind_t ret = (sz_size2index_tab[(size + (ZU(1) << SC_LG_TINY_MIN) - 1) >> SC_LG_TINY_MIN]);
+	assert(ret == sz_size2index_compute(size));
+	return ret;
+}
+
+/* 根据size算出size class的下标
+ */
+szind_t
+sz_size2index(size_t size) {
+	if (likely(size <= SC_LOOKUP_MAXCLASS)) { /* 抵消小于SC_LOOKUP_MAXCLASS的,可以以空间换时间 */
+		return sz_size2index_lookup(size);
+	}
+	return sz_size2index_compute(size); /* 否则就要计算 */
+}
+```
+

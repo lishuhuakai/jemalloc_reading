@@ -45,7 +45,7 @@ struct cache_bin_s {
 	/* Min # cached since last GC. */
 	cache_bin_sz_t low_water; /* 低水位 */
 	/* # of cached objects. */
-	cache_bin_sz_t ncached; / /* 已经缓存的object的数目 */
+	cache_bin_sz_t ncached; /* 已经缓存的object的数目 */
 	/*
 	 * ncached and stats are both modified frequently.  Let's keep them
 	 * close so that they have a higher chance of being on the same

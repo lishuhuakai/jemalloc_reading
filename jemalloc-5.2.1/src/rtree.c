@@ -8,6 +8,7 @@
 /*
  * Only the most significant bits of keys passed to rtree_{read,write}() are
  * used.
+ * 创建基数树
  */
 bool
 rtree_new(rtree_t *rtree, bool zeroed) {
@@ -98,6 +99,7 @@ rtree_delete(tsdn_t *tsdn, rtree_t *rtree) {
 }
 #endif
 
+/* 创建节点 */
 static rtree_node_elm_t *
 rtree_node_init(tsdn_t *tsdn, rtree_t *rtree, unsigned level,
     atomic_p_t *elmp) {
@@ -109,7 +111,7 @@ rtree_node_init(tsdn_t *tsdn, rtree_t *rtree, unsigned level,
 	rtree_node_elm_t *node = atomic_load_p(elmp, ATOMIC_RELAXED);
 	if (node == NULL) {
 		node = rtree_node_alloc(tsdn, rtree, ZU(1) <<
-		    rtree_levels[level].bits);
+		    rtree_levels[level].bits); /* 注意这里分配的数组的大小也是非常夸张的,需要注意的是,这里分配的内存已经清零了 */
 		if (node == NULL) {
 			malloc_mutex_unlock(tsdn, &rtree->init_lock);
 			return NULL;
@@ -161,6 +163,7 @@ rtree_leaf_valid(rtree_leaf_elm_t *leaf) {
 	return ((uintptr_t)leaf != (uintptr_t)0);
 }
 
+/* 尝试读取中间节点的值 */
 static rtree_node_elm_t *
 rtree_child_node_tryread(rtree_node_elm_t *elm, bool dependent) {
 	rtree_node_elm_t *node;
@@ -177,6 +180,7 @@ rtree_child_node_tryread(rtree_node_elm_t *elm, bool dependent) {
 	return node;
 }
 
+/* 读取中间节点,如果没有的话,需要创建 */
 static rtree_node_elm_t *
 rtree_child_node_read(tsdn_t *tsdn, rtree_t *rtree, rtree_node_elm_t *elm,
     unsigned level, bool dependent) {
@@ -219,11 +223,15 @@ rtree_child_leaf_read(tsdn_t *tsdn, rtree_t *rtree, rtree_node_elm_t *elm,
 	return leaf;
 }
 
+/* 执行查找操作
+ * @param key 查找的key
+ * @param init_missing 如果没有找到,就创建
+ */
 rtree_leaf_elm_t *
 rtree_leaf_elm_lookup_hard(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
     uintptr_t key, bool dependent, bool init_missing) {
-	rtree_node_elm_t *node;
-	rtree_leaf_elm_t *leaf;
+	rtree_node_elm_t *node; /* 基数树中间节点 */
+	rtree_leaf_elm_t *leaf; /* 基数树叶子节点 */
 #if RTREE_HEIGHT > 1
 	node = rtree->root;
 #else
@@ -253,7 +261,7 @@ rtree_leaf_elm_lookup_hard(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 			    &node[subkey], level, dependent) :		\
 			    rtree_child_node_tryread(&node[subkey],	\
 			    dependent);					\
-		} else {						\
+		} else {						   \
 			leaf = init_missing ?				\
 			    rtree_child_leaf_read(tsdn, rtree,		\
 			    &node[subkey], level, dependent) :		\
@@ -289,12 +297,12 @@ rtree_leaf_elm_lookup_hard(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 		return &leaf[subkey];					\
 	}
 	if (RTREE_HEIGHT > 1) {
-		RTREE_GET_CHILD(0)
+		RTREE_GET_CHILD(0) /* 找到第0层的节点 */
 	}
 	if (RTREE_HEIGHT > 2) {
-		RTREE_GET_CHILD(1)
+		RTREE_GET_CHILD(1) /* 找到第1层的节点 */
 	}
-	if (RTREE_HEIGHT > 3) {
+	if (RTREE_HEIGHT > 3) { /* rtree不是最多只有3层吗? */
 		for (unsigned i = 2; i < RTREE_HEIGHT-1; i++) {
 			RTREE_GET_CHILD(i)
 		}

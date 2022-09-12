@@ -1,0 +1,1016 @@
+# 1. 结构体的定义
+
+## 1.1 extent
+
+`extent`结构体用于描述一块内存,值得注意的是,`extent`描述的内存可以包含若干个页,除了大内存分配,其他分配一般不直接使用`extent`,而是将`extent`的大内存分割成同样大小的小内存,然后再进行分配,这种类型的`extent`,`jemalloc`也将其称之为`slab`.
+
+```c
+/* Extent (span of pages).  Use accessor functions for e_* fields. 
+ * Extent可能包含若干个page
+ */
+struct extent_s {
+	/*
+	 * Bitfield containing several fields:
+	 *
+	 * a: arena_ind
+	 * b: slab
+	 * c: committed
+	 * d: dumpable
+	 * z: zeroed
+	 * t: state
+	 * i: szind
+	 * f: nfree
+	 * s: bin_shard
+	 * n: sn
+	 *
+	 * nnnnnnnn ... nnnnnnss ssssffff ffffffii iiiiiitt zdcbaaaa aaaaaaaa
+	 *
+	 * arena_ind: Arena from which this extent came, or all 1 bits if
+	 *            unassociated. 这个extent属于哪一个arena
+	 *
+	 * slab: The slab flag indicates whether the extent is used for a slab
+	 *       of small regions.  This helps differentiate small size classes,
+	 *       and it indicates whether interior pointers can be looked up via
+	 *       iealloc(). slab falg用于标记extent是否被用做小区域的slab
+	 *
+	 * committed: The committed flag indicates whether physical memory is
+	 *            committed to the extent, whether explicitly or implicitly
+	 *            as on a system that overcommits and satisfies physical
+	 *            memory needs on demand via soft page faults.
+	 *            committed标记标识,物理内存是否提交到了extent
+	 *
+	 * dumpable: The dumpable flag indicates whether or not we've set the
+	 *           memory in question to be dumpable.  Note that this
+	 *           interacts somewhat subtly with user-specified extent hooks,
+	 *           since we don't know if *they* are fiddling with
+	 *           dumpability (in which case, we don't want to undo whatever
+	 *           they're doing).  To deal with this scenario, we:
+	 *             - Make dumpable false only for memory allocated with the
+	 *               default hooks.
+	 *             - Only allow memory to go from non-dumpable to dumpable,
+	 *               and only once.
+	 *             - Never make the OS call to allow dumping when the
+	 *               dumpable bit is already set.
+	 *           These three constraints mean that we will never
+	 *           accidentally dump user memory that the user meant to set
+	 *           nondumpable with their extent hooks.
+	 *
+	 *
+	 * zeroed: The zeroed flag is used by extent recycling code to track
+	 *         whether memory is zero-filled.
+	 *         zero标记即被extent回收代码使用,用于表示内存是否被零填充
+	 *
+	 * state: The state flag is an extent_state_t.
+	 *
+	 * szind: The szind flag indicates usable size class index for
+	 *        allocations residing in this extent, regardless of whether the
+	 *        extent is a slab.  Extent size and usable size often differ
+	 *        even for non-slabs, either due to sz_large_pad or promotion of
+	 *        sampled small regions.
+	 *
+	 * nfree: Number of free regions in slab.
+	 *
+	 * bin_shard: the shard of the bin from which this extent came.
+	 *
+	 * sn: Serial number (potentially non-unique).
+	 *
+	 *     Serial numbers may wrap around if !opt_retain, but as long as
+	 *     comparison functions fall back on address comparison for equal
+	 *     serial numbers, stable (if imperfect) ordering is maintained.
+	 *
+	 *     Serial numbers may not be unique even in the absence of
+	 *     wrap-around, e.g. when splitting an extent and assigning the same
+	 *     serial number to both resulting adjacent extents.
+	 */
+	uint64_t		e_bits; /* 标记信息 */
+
+	/* Pointer to the extent that this structure is responsible for. */
+	void			*e_addr; /* 指向extent所管理内存的起始地址 */
+
+	union {
+		/*
+		 * Extent size and serial number associated with the extent
+		 * structure (different than the serial number for the extent at
+		 * e_addr).
+		 *
+		 * ssssssss [...] ssssssss ssssnnnn nnnnnnnn
+		 */
+		size_t			e_size_esn;
+	#define EXTENT_SIZE_MASK	((size_t)~(PAGE-1))
+	#define EXTENT_ESN_MASK		((size_t)PAGE-1)
+		/* Base extent size, which may not be a multiple of PAGE. */
+		size_t			e_bsize;
+	};
+
+	/*
+	 * List linkage, used by a variety of lists:
+	 * - bin_t's slabs_full
+	 * - extents_t's LRU
+	 * - stashed dirty extents
+	 * - arena's large allocations
+	 */
+	ql_elm(extent_t)	ql_link;
+
+	/*
+	 * Linkage for per size class sn/address-ordered heaps, and
+	 * for extent_avail
+	 */
+	phn(extent_t)		ph_link;
+
+	union {
+		/* Small region slab metadata. */
+		arena_slab_data_t	e_slab_data; /* 元数据 */
+
+		/* Profiling data, used for large objects. */
+		struct {
+			/* Time when this was allocated. */
+			nstime_t		e_alloc_time;
+			/* Points to a prof_tctx_t. */
+			atomic_p_t		e_prof_tctx;
+		};
+	};
+};
+```
+
+## 1.2 extents
+
+`extents`用于描述一系列的`extent`.
+
+```c
+/* Quantized collection of extents, with built-in LRU queue. */
+/* 一系列extent的集合 */
+struct extents_s {
+	malloc_mutex_t		mtx;
+	/*
+	 * Quantized per size class heaps of extents.
+	 *
+	 * Synchronization: mtx.
+	 */
+	extent_heap_t		heaps[SC_NPSIZES + 1];
+	atomic_zu_t		nextents[SC_NPSIZES + 1];
+	atomic_zu_t		nbytes[SC_NPSIZES + 1];
+
+	/*
+	 * Bitmap for which set bits correspond to non-empty heaps.
+	 *
+	 * Synchronization: mtx.
+	 */
+	bitmap_t		bitmap[BITMAP_GROUPS(SC_NPSIZES + 1)];
+
+	/*
+	 * LRU of all extents in heaps.
+	 *
+	 * Synchronization: mtx.
+	 */
+	extent_list_t		lru;
+
+	/*
+	 * Page sum for all extents in heaps.
+	 *
+	 * The synchronization here is a little tricky.  Modifications to npages
+	 * must hold mtx, but reads need not (though, a reader who sees npages
+	 * without holding the mutex can't assume anything about the rest of the
+	 * state of the extents_t).
+	 */
+	atomic_zu_t		npages;
+
+	/* All stored extents must be in the same state. */
+	extent_state_t		state; /* extents类型 */
+
+	/*
+	 * If true, delay coalescing until eviction; otherwise coalesce during
+	 * deallocation.
+	 */
+	bool			delay_coalesce; /* 是否要延迟合并 */
+};
+```
+
+在`arena`之中,存在若干个`extents`,如`arena->extents_dirty`(用于存储刚刚被释放的`extent`), `arena->extents_muzzy`(从`extents_dirty`中转移过来的`extent`会放入此结构), `arena->extents_retained`.
+
+## 1.3 extent接口
+
+为了操控`extent`所管理的内存,`jemalloc`定义了一系列的接口:
+
+```c
+typedef extent_hooks_s extent_hooks_t;
+struct extent_hooks_s {
+	extent_alloc_t		*alloc; /* 为extent分配管理的内存块 */
+	extent_dalloc_t		*dalloc; /* 销毁extent管理的内存块 */
+	extent_destroy_t	*destroy;
+	extent_commit_t		*commit;
+	extent_decommit_t	*decommit;
+	extent_purge_t		*purge_lazy;
+	extent_purge_t		*purge_forced;
+	extent_split_t		*split; /* extent分离 */
+	extent_merge_t		*merge; /* extent合并 */
+};
+```
+
+我们以`jemalloc`为用户进程分配内存的`extent`为例,它的接口实现如下,需要注意的是,个人翻了一下`jemalloc`的代码,发现了一个有趣的事实.
+
+`extent_hooks_t`这个结构体,到当前版本为止,仅仅只有`extent_hooks_default`这一个实例,因此,本`jemalloc`代码解析的文章中,只要是`extent_hooks_t`的实例,你都可以认为是`extent_hooks_default`:
+
+```c
+/* 函数原型 */
+const extent_hooks_t	extent_hooks_default = {
+	extent_alloc_default,
+	extent_dalloc_default,
+	extent_destroy_default,
+	extent_commit_default,
+	extent_decommit_default,
+	extent_purge_lazy_default,
+	NULL,
+	extent_purge_forced_default,
+	NULL,
+	extent_split_default,
+	extent_merge_default
+};
+```
+
+# 2. extent相关函数
+
+### 2.1 extent的初始化
+
+一个新构建的`extent`,都需要通过`extent_init`来进行初始化.
+
+```c
+/* 记录extent属于哪一个arena */
+static inline void
+extent_arena_set(extent_t *extent, arena_t *arena) {
+	unsigned arena_ind = (arena != NULL) ? arena_ind_get(arena) : ((1U << MALLOCX_ARENA_BITS) - 1);
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_ARENA_MASK) |
+	    ((uint64_t)arena_ind << EXTENT_BITS_ARENA_SHIFT);
+}
+
+static inline void
+extent_binshard_set(extent_t *extent, unsigned binshard) {
+	/* The assertion assumes szind is set already. */
+	assert(binshard < bin_infos[extent_szind_get(extent)].n_shards);
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_BINSHARD_MASK) |
+	    ((uint64_t)binshard << EXTENT_BITS_BINSHARD_SHIFT);
+}
+/* 记录下extent所管理的内存块的地址 */
+static inline void
+extent_addr_set(extent_t *extent, void *addr) {
+	extent->e_addr = addr;
+}
+
+static inline void
+extent_sn_set(extent_t *extent, size_t sn) {
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_SN_MASK) |
+	    ((uint64_t)sn << EXTENT_BITS_SN_SHIFT);
+}
+
+static inline void
+extent_state_set(extent_t *extent, extent_state_t state) {
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_STATE_MASK) |
+	    ((uint64_t)state << EXTENT_BITS_STATE_SHIFT);
+}
+
+static inline void
+extent_zeroed_set(extent_t *extent, bool zeroed) {
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_ZEROED_MASK) |
+	    ((uint64_t)zeroed << EXTENT_BITS_ZEROED_SHIFT);
+}
+
+static inline void
+extent_committed_set(extent_t *extent, bool committed) {
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_COMMITTED_MASK) |
+	    ((uint64_t)committed << EXTENT_BITS_COMMITTED_SHIFT);
+}
+
+static inline void
+extent_dumpable_set(extent_t *extent, bool dumpable) {
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_DUMPABLE_MASK) |
+	    ((uint64_t)dumpable << EXTENT_BITS_DUMPABLE_SHIFT);
+}
+/* 记录下extent的slab标记,即是否用作小内存分配 */
+static inline void
+extent_slab_set(extent_t *extent, bool slab) {
+	extent->e_bits = (extent->e_bits & ~EXTENT_BITS_SLAB_MASK) |
+	    ((uint64_t)slab << EXTENT_BITS_SLAB_SHIFT);
+}
+
+static inline void
+extent_prof_tctx_set(extent_t *extent, prof_tctx_t *tctx) {
+	atomic_store_p(&extent->e_prof_tctx, tctx, ATOMIC_RELEASE);
+}
+
+static inline void
+extent_prof_alloc_time_set(extent_t *extent, nstime_t t) {
+	nstime_copy(&extent->e_alloc_time, &t);
+}
+
+/* extent的初始化
+ * @param arena extent所属的arena
+ * @param addr extent所管理的内存块的地址
+ * @param size 内存块大小
+ */
+static inline void
+extent_init(extent_t *extent, arena_t *arena, void *addr, size_t size,
+    bool slab, szind_t szind, size_t sn, extent_state_t state, bool zeroed,
+    bool committed, bool dumpable, extent_head_state_t is_head) {
+	assert(addr == PAGE_ADDR2BASE(addr) || !slab);
+	/* 这一堆设置函数其实只是设置extent->e_bits的对应bit位而已 */
+	extent_arena_set(extent, arena);
+	extent_addr_set(extent, addr);
+	extent_size_set(extent, size);
+	extent_slab_set(extent, slab);
+	extent_szind_set(extent, szind);
+	extent_sn_set(extent, sn);
+	extent_state_set(extent, state);
+	extent_zeroed_set(extent, zeroed);
+	extent_committed_set(extent, committed);
+	extent_dumpable_set(extent, dumpable);
+	ql_elm_new(extent, ql_link);
+	if (!maps_coalesce) {
+		extent_is_head_set(extent, (is_head == EXTENT_IS_HEAD) ? true : false);
+	}
+}
+```
+
+### 2.2 extent的注册
+
+需要注意的是,一个`extent`一般都会和一个`arena`相关联,因此才有了注册这个概念,`extent_register`用于绑定`extent`和`arena`.
+
+```c
+/* extent分配内存块的级别 */
+static inline szind_t
+extent_szind_get_maybe_invalid(const extent_t *extent) {
+	szind_t szind = (szind_t)((extent->e_bits & EXTENT_BITS_SZIND_MASK) >>
+	    EXTENT_BITS_SZIND_SHIFT);
+	return szind;
+}
+/* extent是否用作小内存分配(slab) */
+static inline bool
+extent_slab_get(const extent_t *extent) {
+	return (bool)((extent->e_bits & EXTENT_BITS_SLAB_MASK) >> EXTENT_BITS_SLAB_SHIFT);
+}
+
+/* 获取首地址 */
+static inline void *
+extent_base_get(const extent_t *extent) {
+	assert(extent->e_addr == PAGE_ADDR2BASE(extent->e_addr) || !extent_slab_get(extent));
+	return PAGE_ADDR2BASE(extent->e_addr);
+}
+
+/* 获取extent的尾部地址 */
+static inline void *
+extent_last_get(const extent_t *extent) {
+	return (void *)((uintptr_t)extent_base_get(extent) + extent_size_get(extent) - PAGE);
+}
+
+static bool
+extent_rtree_leaf_elms_lookup(tsdn_t *tsdn, rtree_ctx_t *rtree_ctx,
+    const extent_t *extent, bool dependent, bool init_missing,
+    rtree_leaf_elm_t **r_elm_a, rtree_leaf_elm_t **r_elm_b) {
+    /* 首先以extent的首地址在extents_rtree中查找 */
+	*r_elm_a = rtree_leaf_elm_lookup(tsdn, &extents_rtree, rtree_ctx,
+	    (uintptr_t)extent_base_get(extent), dependent, init_missing);
+	if (!dependent && *r_elm_a == NULL) {
+		return true;
+	}
+	assert(*r_elm_a != NULL);
+    /* 然后以extent的尾地址在extents_rtree中查找 */
+	*r_elm_b = rtree_leaf_elm_lookup(tsdn, &extents_rtree, rtree_ctx,
+	    (uintptr_t)extent_last_get(extent), dependent, init_missing);
+	if (!dependent && *r_elm_b == NULL) {
+		return true;
+	}
+	assert(*r_elm_b != NULL);
+
+	return false;
+}
+
+static bool
+extent_register_impl(tsdn_t *tsdn, extent_t *extent, bool gdump_add) {
+	rtree_ctx_t rtree_ctx_fallback;
+	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	rtree_leaf_elm_t *elm_a, *elm_b;
+
+	/*
+	 * We need to hold the lock to protect against a concurrent coalesce
+	 * operation that sees us in a partial state.
+	 */
+	extent_lock(tsdn, extent);
+    /* 在rtree中进行查找 */
+	if (extent_rtree_leaf_elms_lookup(tsdn, rtree_ctx, extent, false, true,
+	    &elm_a, &elm_b)) {
+		extent_unlock(tsdn, extent);
+		return true;
+	}
+	/* 将extent的信息记录到rtree之中 */
+	szind_t szind = extent_szind_get_maybe_invalid(extent);
+	bool slab = extent_slab_get(extent);
+	extent_rtree_write_acquired(tsdn, elm_a, elm_b, extent, szind, slab);
+	if (slab) {
+		extent_interior_register(tsdn, rtree_ctx, extent, szind);
+	}
+
+	extent_unlock(tsdn, extent);
+	return false;
+}
+
+/* 注册extent */
+static bool
+extent_register(tsdn_t *tsdn, extent_t *extent) {
+	return extent_register_impl(tsdn, extent, true);
+}
+```
+
+### 2.3 extent的反注册
+
+```c
+/*
+ * Removes all pointers to the given extent from the global rtree.
+ */
+static void
+extent_deregister_impl(tsdn_t *tsdn, extent_t *extent, bool gdump) {
+	rtree_ctx_t rtree_ctx_fallback;
+	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	rtree_leaf_elm_t *elm_a, *elm_b;
+	extent_rtree_leaf_elms_lookup(tsdn, rtree_ctx, extent, true, false, &elm_a, &elm_b);
+
+	extent_lock(tsdn, extent);
+	/* 直接将rtree上的值清空即可 */
+	extent_rtree_write_acquired(tsdn, elm_a, elm_b, NULL, SC_NSIZES, false);
+	if (extent_slab_get(extent)) {
+		extent_interior_deregister(tsdn, rtree_ctx, extent);
+		extent_slab_set(extent, false);
+	}
+	extent_unlock(tsdn, extent);
+}
+
+/* 断开extent和tsdn的联系 */
+static void
+extent_deregister(tsdn_t *tsdn, extent_t *extent) {
+	extent_deregister_impl(tsdn, extent, true);
+}
+```
+
+
+
+# 3. extent接口的实现
+
+## 3.1 为extent分配内存
+
+`extent`实际代表一大块内存,之后所有的内存分配都建立在`slab`的基础之上.
+
+一般而言,上层代码会直接分配一个`extent`,最终会调用`extent_alloc_wrapper`:
+
+```c
+/* 实际进行内存分配 */
+static extent_t *
+extent_alloc_wrapper_hard(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, void *new_addr, size_t size, size_t pad,
+    size_t alignment, bool slab, szind_t szind, bool *zero, bool *commit) {
+	size_t esize = size + pad;
+	extent_t *extent = extent_alloc(tsdn, arena); /* 分配元数据 */
+	if (extent == NULL) {
+		return NULL;
+	}
+	void *addr;
+	size_t palignment = ALIGNMENT_CEILING(alignment, PAGE);
+	if (*r_extent_hooks == &extent_hooks_default) {
+		/* Call directly to propagate tsdn. */
+		addr = extent_alloc_default_impl(tsdn, arena, new_addr, esize,
+		    palignment, zero, commit); /* 分配虚拟内存 */
+	} else { /* else分支当前版本调度不到,留给后续扩展 */
+		extent_hook_pre_reentrancy(tsdn, arena);
+        /* 这里直接调用alloc回调来分配数据 */
+		addr = (*r_extent_hooks)->alloc(*r_extent_hooks, new_addr,
+		    esize, palignment, zero, commit, arena_ind_get(arena));
+		extent_hook_post_reentrancy(tsdn);
+	}
+	if (addr == NULL) {
+		extent_dalloc(tsdn, arena, extent);
+		return NULL;
+	}
+    /* 初始化extent之中 */
+	extent_init(extent, arena, addr, esize, slab, szind,
+	    arena_extent_sn_next(arena), extent_state_active, *zero, *commit,
+	    true, EXTENT_NOT_HEAD);
+	if (pad != 0) {
+		extent_addr_randomize(tsdn, extent, alignment);
+	}
+    /* 注册extent */
+	if (extent_register(tsdn, extent)) {
+		extent_dalloc(tsdn, arena, extent);
+		return NULL;
+	}
+	return extent;
+}
+
+extent_t *
+extent_alloc_wrapper(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, void *new_addr, size_t size, size_t pad,
+    size_t alignment, bool slab, szind_t szind, bool *zero, bool *commit) {
+	extent_hooks_assure_initialized(arena, r_extent_hooks);
+	extent_t *extent = extent_alloc_retained(tsdn, arena, r_extent_hooks,
+	    new_addr, size, pad, alignment, slab, szind, zero, commit); /* 分配extent */
+	if (extent == NULL) {
+		if (opt_retain && new_addr != NULL) {
+			/*
+			 * When retain is enabled and new_addr is set, we do not
+			 * attempt extent_alloc_wrapper_hard which does mmap
+			 * that is very unlikely to succeed (unless it happens
+			 * to be at the end).
+			 */
+			return NULL;
+		}
+		extent = extent_alloc_wrapper_hard(tsdn, arena, r_extent_hooks,
+		    new_addr, size, pad, alignment, slab, szind, zero, commit);
+	}
+	return extent;
+}
+```
+
+`extent_alloc_wrapper_hard`实际会直接调用`extent_alloc_default_impl`来为新构建的`extent`分配管理内存,注意,这个函数其实是`extent_alloc_default`的一部分,只是为了减少调用层次,所以直接调用:
+
+```c
+/*
+ * If the caller specifies (!*zero), it is still possible to receive zeroed
+ * memory, in which case *zero is toggled to true.  arena_extent_alloc() takes
+ * advantage of this to avoid demanding zeroed extents, but taking advantage of
+ * them if they are returned.
+ */
+/* 如果调用者指定了(!*zero),仍然有可能返回清零后的内存 */
+static void *
+extent_alloc_core(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
+    size_t alignment, bool *zero, bool *commit, dss_prec_t dss_prec) {
+	void *ret;
+
+	/* "primary" dss. */
+    /* dss作为主要的分配手段 */
+	if (have_dss && dss_prec == dss_prec_primary && (ret =
+	    extent_alloc_dss(tsdn, arena, new_addr, size, alignment, zero, commit)) != NULL) {
+		return ret;
+	}
+	/* mmap. */
+	if ((ret = extent_alloc_mmap(new_addr, size, alignment, zero, commit)) != NULL) {
+		return ret;
+	}
+	/* "secondary" dss. */
+	if (have_dss && dss_prec == dss_prec_secondary && (ret =
+	    extent_alloc_dss(tsdn, arena, new_addr, size, alignment, zero, commit)) != NULL) {
+		return ret;
+	}
+	/* All strategies for allocation failed. */
+	return NULL;
+}
+
+static void *
+extent_alloc_default_impl(tsdn_t *tsdn, arena_t *arena, void *new_addr,
+    size_t size, size_t alignment, bool *zero, bool *commit) {
+	void *ret = extent_alloc_core(tsdn, arena, new_addr, size, alignment, zero,
+	    commit, (dss_prec_t)atomic_load_u(&arena->dss_prec, ATOMIC_RELAXED));
+	if (have_madvise_huge && ret) {
+		pages_set_thp_state(ret, size);
+	}
+	return ret;
+}
+
+/*
+ * 为extent分配管理内存
+ */
+static void *
+extent_alloc_default(extent_hooks_t *extent_hooks, void *new_addr, size_t size,
+    size_t alignment, bool *zero, bool *commit, unsigned arena_ind) {
+	tsdn_t *tsdn;
+	arena_t *arena;
+
+	tsdn = tsdn_fetch();
+	arena = arena_get(tsdn, arena_ind, false); /* 获得线程私有的arena结构体 */
+	/*
+	 * The arena we're allocating on behalf of must have been initialized
+	 * already.
+	 */
+	return extent_alloc_default_impl(tsdn, arena, new_addr, size,
+	    ALIGNMENT_CEILING(alignment, PAGE), zero, commit);
+}
+```
+
+我们以`sbrk`为例,看一下`jemalloc`是如何分配内存的:
+
+```c
+/* 通过dss(sbrk)来进行内存的分配
+ * @param size 要分配的内存的长度
+ */
+void *
+extent_alloc_dss(tsdn_t *tsdn, arena_t *arena, void *new_addr, size_t size,
+    size_t alignment, bool *zero, bool *commit) {
+	extent_t *gap;
+
+	cassert(have_dss);
+	/*
+	 * sbrk() uses a signed increment argument, so take care not to
+	 * interpret a large allocation request as a negative increment.
+	 */
+	if ((intptr_t)size < 0) {
+		return NULL;
+	}
+
+	gap = extent_alloc(tsdn, arena); /* 获得一个新的extent */
+	if (gap == NULL) {
+		return NULL;
+	}
+    /* 保证没有线程在分配内存(sbark)
+     * 类似于加锁操作
+     */
+	extent_dss_extending_start();
+	if (!atomic_load_b(&dss_exhausted, ATOMIC_ACQUIRE)) {
+		/*
+		 * The loop is necessary to recover from races with other
+		 * threads that are using the DSS for something other than
+		 * malloc.
+		 */
+		while (true) {
+            /* 获取栈顶的虚拟地址 */
+			void *max_cur = extent_dss_max_update(new_addr);
+			if (max_cur == NULL) {
+				goto label_oom;
+			}
+			/*
+			 * Compute how much page-aligned gap space (if any) is
+			 * necessary to satisfy alignment.  This space can be
+			 * recycled for later use.
+			 */
+			/* 页对齐的首地址 */
+			void *gap_addr_page = (void *)(PAGE_CEILING(
+			    (uintptr_t)max_cur));
+
+			void *ret = (void *)ALIGNMENT_CEILING((uintptr_t)gap_addr_page, alignment);
+            /* 页内碎片大小 */
+			size_t gap_size_page = (uintptr_t)ret - (uintptr_t)gap_addr_page;
+			if (gap_size_page != 0) {
+                /* 这里为空闲出来的gap创建了一个extent */
+				extent_init(gap, arena, gap_addr_page,
+				    gap_size_page, false, SC_NSIZES,
+				    arena_extent_sn_next(arena),
+				    extent_state_active, false, true, true,
+				    EXTENT_NOT_HEAD);
+			}
+			/*
+			 * Compute the address just past the end of the desired
+			 * allocation space.
+			 */
+			/* 下一个可供分配的虚拟首地址 */
+			void *dss_next = (void *)((uintptr_t)ret + size);
+			if ((uintptr_t)ret < (uintptr_t)max_cur ||
+			    (uintptr_t)dss_next < (uintptr_t)max_cur) {
+				goto label_oom; /* Wrap-around. */
+			}
+			/* Compute the increment, including subpage bytes. */
+			void *gap_addr_subpage = max_cur;
+			size_t gap_size_subpage = (uintptr_t)ret -
+			    (uintptr_t)gap_addr_subpage;
+			intptr_t incr = gap_size_subpage + size;
+
+			assert((uintptr_t)max_cur + incr == (uintptr_t)ret + size);
+
+			/* Try to allocate. */
+            /* 尝试进行内存的分配 */
+			void *dss_prev = extent_dss_sbrk(incr);
+			if (dss_prev == max_cur) { /* 内存分配成功 */
+				/* Success. */
+				atomic_store_p(&dss_max, dss_next, ATOMIC_RELEASE);
+				extent_dss_extending_finish();
+
+				if (gap_size_page != 0) {
+                    /* 将extent放入arena */
+					extent_dalloc_gap(tsdn, arena, gap);
+				} else {
+					extent_dalloc(tsdn, arena, gap);
+				}
+				if (!*commit) {
+					*commit = pages_decommit(ret, size);
+				}
+				if (*zero && *commit) {
+					extent_hooks_t *extent_hooks = EXTENT_HOOKS_INITIALIZER;
+					extent_t extent;
+                    /* 这里的extent才是真正要分配的extent */
+					extent_init(&extent, arena, ret, size,
+					    size, false, SC_NSIZES,
+					    extent_state_active, false, true,
+					    true, EXTENT_NOT_HEAD);
+					if (extent_purge_forced_wrapper(tsdn,
+					    arena, &extent_hooks, &extent, 0, size)) {
+						memset(ret, 0, size);
+					}
+				}
+				return ret;
+			}
+			/*
+			 * Failure, whether due to OOM or a race with a raw
+			 * sbrk() call from outside the allocator.
+			 */
+			if (dss_prev == (void *)-1) {
+				/* OOM. */
+				atomic_store_b(&dss_exhausted, true, ATOMIC_RELEASE);
+				goto label_oom;
+			}
+		}
+	}
+label_oom:
+	extent_dss_extending_finish();
+	extent_dalloc(tsdn, arena, gap);
+	return NULL;
+}
+```
+
+下面列出一些辅助函数.
+
+### 3.1.1 extent内存分配
+
+值得注意的是,`extent`使用专用的`base`分配器来分配内存,这个分配器后面会讲述,这里暂时忽略.
+
+```c
+/* 为extent分配内存 */
+extent_t *
+extent_alloc(tsdn_t *tsdn, arena_t *arena) {
+	malloc_mutex_lock(tsdn, &arena->extent_avail_mtx);
+	extent_t *extent = extent_avail_first(&arena->extent_avail);  /* 尝试使用空闲的extent */
+	if (extent == NULL) {
+		malloc_mutex_unlock(tsdn, &arena->extent_avail_mtx);
+		return base_alloc_extent(tsdn, arena->base); /* 元数据专用base分配器 */
+	}
+	extent_avail_remove(&arena->extent_avail, extent);
+	atomic_fetch_sub_zu(&arena->extent_avail_cnt, 1, ATOMIC_RELAXED);
+	malloc_mutex_unlock(tsdn, &arena->extent_avail_mtx);
+	return extent;
+}
+```
+
+### 3.1.2 获得堆栈顶部的地址
+
+```c
+/* Atomic current upper limit on DSS addresses. */
+static atomic_p_t	dss_max; /* 堆栈顶部地址 */
+
+static void *
+extent_dss_max_update(void *new_addr) {
+	/*
+	 * Get the current end of the DSS as max_cur and assure that dss_max is
+	 * up to date.
+	 */
+	void *max_cur = extent_dss_sbrk(0); /* 获取堆栈顶部地址 */
+	if (max_cur == (void *)-1) {
+		return NULL;
+	}
+	atomic_store_p(&dss_max, max_cur, ATOMIC_RELEASE);
+	/* Fixed new_addr can only be supported if it is at the edge of DSS. */
+	if (new_addr != NULL && max_cur != new_addr) {
+		return NULL;
+	}
+	return max_cur;
+}
+```
+
+### 3.1.3 实际内存分配
+
+```c
+/* 调用sbrk系统调用,调整data segment的大小 */
+static void *
+extent_dss_sbrk(intptr_t increment) {
+	return sbrk(increment);
+}
+```
+
+### 3.1.4 extent_dalloc_gap
+
+```c
+void
+extent_dalloc_gap(tsdn_t *tsdn, arena_t *arena, extent_t *extent) {
+	extent_hooks_t *extent_hooks = EXTENT_HOOKS_INITIALIZER; /* 设置为NULL */
+
+	if (extent_register(tsdn, extent)) {
+		extent_dalloc(tsdn, arena, extent);
+		return;
+	}
+	extent_dalloc_wrapper(tsdn, arena, &extent_hooks, extent); /* 回收extent所描述的内存块 */
+}
+```
+
+## 3.2 回收extent所描述的内存块
+
+`extent_dalloc_wrapper`用于回收`extent`所描述的内存块,但是`extent`并不回收,而是放入`arena->extent_avail`,方便后面复用.`extent`的内存分配来自`base`分配器.
+
+```c
+/* 回收extent这个结构 */
+void
+extent_dalloc(tsdn_t *tsdn, arena_t *arena, extent_t *extent) {
+	malloc_mutex_lock(tsdn, &arena->extent_avail_mtx);
+	extent_avail_insert(&arena->extent_avail, extent);
+	atomic_fetch_add_zu(&arena->extent_avail_cnt, 1, ATOMIC_RELAXED);
+	malloc_mutex_unlock(tsdn, &arena->extent_avail_mtx);
+}
+
+/* 尝试回收extent对应的内存 */
+static bool
+extent_dalloc_wrapper_try(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extent_t *extent) {
+	bool err;
+	extent_addr_set(extent, extent_base_get(extent));
+	extent_hooks_assure_initialized(arena, r_extent_hooks);
+	if (*r_extent_hooks == &extent_hooks_default) {
+        /* 内存回收 */
+		err = extent_dalloc_default_impl(extent_base_get(extent), extent_size_get(extent));
+	} else { /* 这分支基本调度不到,可以暂时忽略 */
+		extent_hook_pre_reentrancy(tsdn, arena);
+		err = ((*r_extent_hooks)->dalloc == NULL ||
+		    (*r_extent_hooks)->dalloc(*r_extent_hooks,
+		    extent_base_get(extent), extent_size_get(extent),
+		    extent_committed_get(extent), arena_ind_get(arena)));
+		extent_hook_post_reentrancy(tsdn);
+	}
+
+	if (!err) {
+        /* extent这个结构还是要复用的. */
+		extent_dalloc(tsdn, arena, extent);
+	}
+	return err;
+}
+
+```
+
+`extent_dalloc_wrapper_try`会调用`extent_dalloc_default_impl`来回收`extent`所管理的内存.
+
+```c
+static bool
+extent_dalloc_default_impl(void *addr, size_t size) {
+	if (!have_dss || !extent_in_dss(addr)) {
+		return extent_dalloc_mmap(addr, size);
+	}
+	return true;
+}
+
+static bool
+extent_dalloc_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
+    bool committed, unsigned arena_ind) {
+	return extent_dalloc_default_impl(addr, size);
+}
+```
+
+`extent_dalloc_mmap`实际调用`munmap`来向操作系统来解除映射关系.
+
+```c
+static void
+os_pages_unmap(void *addr, size_t size) {
+	if (munmap(addr, size) == -1) {
+		char buf[BUFERROR_BUF];
+		buferror(get_errno(), buf, sizeof(buf));
+		malloc_printf("<jemalloc>: Error in munmap(): %s\n", buf);
+		if (opt_abort) {
+			abort();
+		}
+	}
+}
+
+/* 取消映射 */
+void
+pages_unmap(void *addr, size_t size) {
+	os_pages_unmap(addr, size);
+}
+
+bool
+extent_dalloc_mmap(void *addr, size_t size) {
+	if (!opt_retain) {
+		pages_unmap(addr, size);
+	}
+	return opt_retain;
+}
+```
+
+## 3.3 销毁extent所管理的内存
+
+`extent_destroy_default`函数用于销毁`extent`所管理的内存.
+
+这里的实现和`extent_dalloc_default`非常类似,因此不过多赘述.
+
+```c
+/* 取消映射 */
+void
+pages_unmap(void *addr, size_t size) {
+	os_pages_unmap(addr, size);
+}
+
+static void
+extent_destroy_default_impl(void *addr, size_t size) {
+	if (!have_dss || !extent_in_dss(addr)) {
+		pages_unmap(addr, size);
+	}
+}
+
+/* 销毁掉extent */
+static void
+extent_destroy_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
+    bool committed, unsigned arena_ind) {
+	extent_destroy_default_impl(addr, size);
+}
+```
+
+## 3.4 extent的合并
+
+```c
+/* Base address of the DSS. */
+static void		*dss_base; /* 堆栈底部地址 */
+
+static bool
+extent_in_dss_helper(void *addr, void *max) {
+	return ((uintptr_t)addr >= (uintptr_t)dss_base && (uintptr_t)addr <
+	    (uintptr_t)max);
+}
+
+/* 判断两个地址是否可以合并 */
+bool
+extent_dss_mergeable(void *addr_a, void *addr_b) {
+	void *max;
+
+	cassert(have_dss);
+	if ((uintptr_t)addr_a < (uintptr_t)dss_base && (uintptr_t)addr_b <
+	    (uintptr_t)dss_base) {
+		return true;
+	}
+	/* dss_max为最大地址 */
+	max = atomic_load_p(&dss_max, ATOMIC_ACQUIRE);
+	return (extent_in_dss_helper(addr_a, max) == extent_in_dss_helper(addr_b, max));
+}
+
+static bool
+extent_merge_default_impl(void *addr_a, void *addr_b) {
+	if (!maps_coalesce && !opt_retain) {
+		return true;
+	}
+	if (have_dss && !extent_dss_mergeable(addr_a, addr_b)) {
+		return true;
+	}
+
+	return false;
+}
+
+/* 根据地址,反方向得到地址所属的extent */
+extent_t *
+iealloc(tsdn_t *tsdn, const void *ptr) {
+	rtree_ctx_t rtree_ctx_fallback;
+	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	return rtree_extent_read(tsdn, &extents_rtree, rtree_ctx,
+	    (uintptr_t)ptr, true);
+}
+
+static bool
+extent_merge_default(extent_hooks_t *extent_hooks, void *addr_a, size_t size_a,
+    void *addr_b, size_t size_b, bool committed, unsigned arena_ind) {
+	if (!maps_coalesce) {
+		tsdn_t *tsdn = tsdn_fetch();
+		extent_t *a = iealloc(tsdn, addr_a);
+		extent_t *b = iealloc(tsdn, addr_b);
+		if (extent_head_no_merge(a, b)) {
+			return true;
+		}
+	}
+	return extent_merge_default_impl(addr_a, addr_b);
+}
+```
+
+`extent_head_no_merge`的实现如下:
+
+```c
+/* opt_retain表示是否回收未使用的虚拟内存,一般设置为false */
+bool	opt_retain =
+#ifdef JEMALLOC_RETAIN
+    true
+#else
+    false
+#endif
+    ;
+
+/* 判断两个extent是否可以合并 */
+static bool
+extent_head_no_merge(extent_t *a, extent_t *b) {
+	/*
+	 * When coalesce is not always allowed (Windows), only merge extents
+	 * from the same VirtualAlloc region under opt.retain (in which case
+	 * MEM_DECOMMIT is utilized for purging).
+	 */
+	if (maps_coalesce) {
+		return false;
+	}
+	if (!opt_retain) {
+		return true;
+	}
+	/* If b is a head extent, disallow the cross-region merge. */
+	if (extent_is_head_get(b)) {
+		/*
+		 * Additionally, sn should not overflow with retain; sanity
+		 * check that different regions have unique sn.
+		 */
+		return true;
+	}
+	return false;
+}
+```
+
+
+
+
+

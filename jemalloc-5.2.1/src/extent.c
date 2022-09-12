@@ -182,7 +182,7 @@ extent_lock_from_addr(tsdn_t *tsdn, rtree_ctx_t *rtree_ctx, void *addr,
 extent_t *
 extent_alloc(tsdn_t *tsdn, arena_t *arena) {
 	malloc_mutex_lock(tsdn, &arena->extent_avail_mtx);
-	extent_t *extent = extent_avail_first(&arena->extent_avail);
+	extent_t *extent = extent_avail_first(&arena->extent_avail); /* 尝试使用空闲的extent */
 	if (extent == NULL) {
 		malloc_mutex_unlock(tsdn, &arena->extent_avail_mtx);
 		return base_alloc_extent(tsdn, arena->base); /* 元数据专用base分配器 */
@@ -719,13 +719,14 @@ static bool
 extent_rtree_leaf_elms_lookup(tsdn_t *tsdn, rtree_ctx_t *rtree_ctx,
     const extent_t *extent, bool dependent, bool init_missing,
     rtree_leaf_elm_t **r_elm_a, rtree_leaf_elm_t **r_elm_b) {
+    /* 首先以extent的首地址在extents_rtree中查找 */
 	*r_elm_a = rtree_leaf_elm_lookup(tsdn, &extents_rtree, rtree_ctx,
 	    (uintptr_t)extent_base_get(extent), dependent, init_missing);
 	if (!dependent && *r_elm_a == NULL) {
 		return true;
 	}
 	assert(*r_elm_a != NULL);
-
+    /* 然后以extent的尾地址在extents_rtree中查找 */
 	*r_elm_b = rtree_leaf_elm_lookup(tsdn, &extents_rtree, rtree_ctx,
 	    (uintptr_t)extent_last_get(extent), dependent, init_missing);
 	if (!dependent && *r_elm_b == NULL) {
@@ -746,6 +747,7 @@ extent_rtree_write_acquired(tsdn_t *tsdn, rtree_leaf_elm_t *elm_a,
 	}
 }
 
+/* 将extent的每一个块都注册到extetns_rtree之中,以块的首地址作为key */
 static void
 extent_interior_register(tsdn_t *tsdn, rtree_ctx_t *rtree_ctx, extent_t *extent,
     szind_t szind) {
@@ -807,7 +809,7 @@ extent_register_impl(tsdn_t *tsdn, extent_t *extent, bool gdump_add) {
 	 * operation that sees us in a partial state.
 	 */
 	extent_lock(tsdn, extent);
-
+    /* 在树中进行查找,没有找到,会创建叶子节点 */
 	if (extent_rtree_leaf_elms_lookup(tsdn, rtree_ctx, extent, false, true,
 	    &elm_a, &elm_b)) {
 		extent_unlock(tsdn, extent);
@@ -1287,7 +1289,7 @@ extent_alloc_default(extent_hooks_t *extent_hooks, void *new_addr, size_t size,
 	arena_t *arena;
 
 	tsdn = tsdn_fetch();
-	arena = arena_get(tsdn, arena_ind, false);
+	arena = arena_get(tsdn, arena_ind, false); /* 获得线程私有的arena结构体 */
 	/*
 	 * The arena we're allocating on behalf of must have been initialized
 	 * already.
@@ -1549,12 +1551,14 @@ extent_alloc_wrapper_hard(tsdn_t *tsdn, arena_t *arena,
 		extent_dalloc(tsdn, arena, extent);
 		return NULL;
 	}
+    /* 初始化extent之中 */
 	extent_init(extent, arena, addr, esize, slab, szind,
 	    arena_extent_sn_next(arena), extent_state_active, *zero, *commit,
 	    true, EXTENT_NOT_HEAD);
 	if (pad != 0) {
 		extent_addr_randomize(tsdn, extent, alignment);
 	}
+    /* 注册extent */
 	if (extent_register(tsdn, extent)) {
 		extent_dalloc(tsdn, arena, extent);
 		return NULL;

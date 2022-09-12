@@ -1,0 +1,679 @@
+```c
+void
+arena_dalloc_bin_junked_locked(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
+    szind_t binind, extent_t *extent, void *ptr) {
+	arena_dalloc_bin_locked_impl(tsdn, arena, bin, binind, extent, ptr, true);
+}
+```
+
+## 1. extent gc
+
+```c
+/* 断开slab和bin的联系
+ *
+ */
+static void
+arena_dissociate_bin_slab(arena_t *arena, extent_t *slab, bin_t *bin) {
+	/* Dissociate slab from bin. */
+	if (slab == bin->slabcur) {
+		bin->slabcur = NULL;
+	} else {
+		szind_t binind = extent_szind_get(slab);
+		const bin_info_t *bin_info = &bin_infos[binind];
+
+		/*
+		 * The following block's conditional is necessary because if the
+		 * slab only contains one region, then it never gets inserted
+		 * into the non-full slabs heap.
+		 */
+		 /* 如果slab只包含1个region,那它不能被插入non-full slabs heap中 */
+		if (bin_info->nregs == 1) {
+			arena_bin_slabs_full_remove(arena, bin, slab);
+		} else {
+			arena_bin_slabs_nonfull_remove(bin, slab);
+		}
+	}
+}
+
+/*
+ * @param binind 索引值
+ * @param junked 是否要填充垃圾值
+ * @param slab 要回收的内存所属的extent
+ */
+static void
+arena_dalloc_bin_locked_impl(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
+    szind_t binind, extent_t *slab, void *ptr, bool junked) {
+	arena_slab_data_t *slab_data = extent_slab_data_get(slab); /* 获取位图信息 */
+	const bin_info_t *bin_info = &bin_infos[binind];
+
+	if (!junked && config_fill && unlikely(opt_junk_free)) {
+		arena_dalloc_junk_small(ptr, bin_info);
+	}
+    /* 将对应的标记清空 */
+	arena_slab_reg_dalloc(slab, slab_data, ptr);
+	unsigned nfree = extent_nfree_get(slab); /* 获取slab中空闲的内存块的数目 */
+	if (nfree == bin_info->nregs) { /* 这里说明slab中没有任何内存被分配出去了 */
+		arena_dissociate_bin_slab(arena, slab, bin);
+        /* 进行回收操作 */
+		arena_dalloc_bin_slab(tsdn, arena, slab, bin);
+	} else if (nfree == 1 && slab != bin->slabcur) {
+		arena_bin_slabs_full_remove(arena, bin, slab);
+		arena_bin_lower_slab(tsdn, arena, slab, bin);
+	}
+}
+```
+
+`arena_delloc_bin_slab`用于回收空闲的`slab`:
+
+```c
+static void
+arena_dalloc_bin_slab(tsdn_t *tsdn, arena_t *arena, extent_t *slab, bin_t *bin) {
+	malloc_mutex_unlock(tsdn, &bin->lock);
+	/******************************/
+	arena_slab_dalloc(tsdn, arena, slab);
+	/****************************/
+	malloc_mutex_lock(tsdn, &bin->lock);
+}
+```
+
+在持有锁的情况下,调用`arena_slab_dalloc`来进行内存的回收:
+
+```c
+/* 内存回收 */
+static void
+arena_slab_dalloc(tsdn_t *tsdn, arena_t *arena, extent_t *slab) {
+	arena_nactive_sub(arena, extent_size_get(slab) >> LG_PAGE); /* 更新arena的nactive计数 */
+	extent_hooks_t *extent_hooks = EXTENT_HOOKS_INITIALIZER; /* 这里的值为NULL */
+	arena_extents_dirty_dalloc(tsdn, arena, &extent_hooks, slab);
+}
+```
+
+接下来调用`arena_extents_dirty_dalloc`, 这个函数做了一件很重要的事情,那就是将要回收的`extent`放入了`arena->extens_dirty`之中:
+
+```c
+/* arena内存释放
+ * @param extent 待释放的extent
+ */
+void
+arena_extents_dirty_dalloc(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extent_t *extent) {
+    /* 将extent放入extens_dirty队列 */
+	extents_dalloc(tsdn, arena, r_extent_hooks, &arena->extents_dirty, extent);
+	if (arena_dirty_decay_ms_get(arena) == 0) { /* 立马进行内存回收工作 */
+		arena_decay_dirty(tsdn, arena, false, true);
+	} else {
+		arena_background_thread_inactivity_check(tsdn, arena, false);
+	}
+}
+```
+
+当达到释放标准的时候,就要开始进行内存回收工作了,调用的是`arena_decay_dirty`:
+
+```c
+/* arena进行内存回收操作
+ * @param is_backgroud_thread 是否为后台线程
+ * @param all 是否全部进行回收
+ */
+static bool
+arena_decay_dirty(tsdn_t *tsdn, arena_t *arena, bool is_background_thread, bool all) {
+	return arena_decay_impl(tsdn, arena, &arena->decay_dirty,
+	    &arena->extents_dirty, is_background_thread, all);
+}
+```
+
+我们顺着前面的调用栈来,调用到`arena_decay_impl`的时候,`all`为`true`,`extents`为`arena->extents_dirty`:
+
+```c
+/*
+ * @param extents 待回收的extent组成的链表
+ * @param all 是否全部回收
+ */
+static bool
+arena_decay_impl(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
+    extents_t *extents, bool is_background_thread, bool all) {
+	if (all) {
+		malloc_mutex_lock(tsdn, &decay->mtx);
+		arena_decay_to_limit(tsdn, arena, decay, extents, all, 0,
+		    extents_npages_get(extents), is_background_thread);
+		malloc_mutex_unlock(tsdn, &decay->mtx);
+		return false;
+	}
+
+	if (malloc_mutex_trylock(tsdn, &decay->mtx)) {
+		/* No need to wait if another thread is in progress. */
+		return true;
+	}
+
+	bool epoch_advanced = arena_maybe_decay(tsdn, arena, decay, extents, is_background_thread);
+	size_t npages_new;
+	if (epoch_advanced) {
+		/* Backlog is updated on epoch advance. */
+		npages_new = decay->backlog[SMOOTHSTEP_NSTEPS-1];
+	}
+	malloc_mutex_unlock(tsdn, &decay->mtx);
+
+	if (have_background_thread && background_thread_enabled() &&
+	    epoch_advanced && !is_background_thread) {
+		background_thread_interval_check(tsdn, arena, decay, npages_new);
+	}
+	return false;
+}
+```
+
+因此就会调用`arena_decay_to_limit`来回收内存:
+
+```c
+/*
+ * npages_limit: Decay at most npages_decay_max pages without violating the
+ * invariant: (extents_npages_get(extents) >= npages_limit).  We need an upper
+ * bound on number of pages in order to prevent unbounded growth (namely in
+ * stashed), otherwise unbounded new pages could be added to extents during the
+ * current decay run, so that the purging thread never finishes.
+ */
+/* 执行回收操作
+ * @param npages_limit
+ * @param npages_decay_max 最多回收的页的个数
+ * @param is_backgroud_thread 是否要启动后台线程
+ */
+static void
+arena_decay_to_limit(tsdn_t *tsdn, arena_t *arena, arena_decay_t *decay,
+    extents_t *extents, bool all, size_t npages_limit, size_t npages_decay_max,
+    bool is_background_thread) {
+	malloc_mutex_assert_owner(tsdn, &decay->mtx);
+	if (decay->purging) {
+		return;
+	}
+	decay->purging = true; /* 表示正在执行回收工作 */
+	malloc_mutex_unlock(tsdn, &decay->mtx);
+
+	extent_hooks_t *extent_hooks = extent_hooks_get(arena); /* 注意,这里的会返回extent_hooks_default */
+	extent_list_t decay_extents;
+	extent_list_init(&decay_extents);
+	/* npurge为要回收的页的数目 */
+	size_t npurge = arena_stash_decayed(tsdn, arena, &extent_hooks, extents,
+	    npages_limit, npages_decay_max, &decay_extents); /* 计算要回收的也的个数 */
+	if (npurge != 0) {
+		size_t npurged = arena_decay_stashed(tsdn, arena,
+		    &extent_hooks, decay, extents, all, &decay_extents,
+		    is_background_thread); /* 执行回收工作 */
+	}
+	malloc_mutex_lock(tsdn, &decay->mtx);
+	decay->purging = false;
+}
+```
+
+`arena_stash_decayed`用于计算要回收的页的个数,顺着调用栈,这里的`extens`为`arena->extents_dirty`:
+
+```c
+/* 计算要回收的页的个数
+ * @param npages_decay_max 最多回收的页的个数
+ * @param decay_extents 要回收的extent将放入此链表
+ */
+static size_t
+arena_stash_decayed(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extents_t *extents, size_t npages_limit,
+	size_t npages_decay_max, extent_list_t *decay_extents) {
+	/* Stash extents according to npages_limit. */
+	size_t nstashed = 0;
+	extent_t *extent;
+	while (nstashed < npages_decay_max &&
+	    (extent = extents_evict(tsdn, arena, r_extent_hooks, extents, npages_limit)) != NULL) {
+		extent_list_append(decay_extents, extent);
+		nstashed += extent_size_get(extent) >> LG_PAGE;
+	}
+	return nstashed;
+}
+```
+
+`arena_decay_stashed`才是真正执行回收工作:
+
+```c
+/* 执行回收工作
+ * @param decay_extents 待回收的extent组成的链表
+ * @param all 是否要全部回收
+ */
+static size_t
+arena_decay_stashed(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, arena_decay_t *decay, extents_t *extents,
+    bool all, extent_list_t *decay_extents, bool is_background_thread) {
+	size_t nmadvise, nunmapped;
+	size_t npurged;
+
+	npurged = 0;
+    /* 先将脏页回收到muzzy队列 */
+	ssize_t muzzy_decay_ms = arena_muzzy_decay_ms_get(arena); /* 回收时间间隔 */
+	for (extent_t *extent = extent_list_first(decay_extents); extent !=
+	    NULL; extent = extent_list_first(decay_extents)) {
+		size_t npages = extent_size_get(extent) >> LG_PAGE; /* 页的个数 */
+		npurged += npages;
+		extent_list_remove(decay_extents, extent); /* 从链表中移除 */
+		switch (extents_state_get(extents)) { /* 判断extents的状态 */
+		case extent_state_active:
+			not_reached();
+		case extent_state_dirty:
+            /* dirty -> muzzy */
+			if (!all && muzzy_decay_ms != 0 &&
+			    !extent_purge_lazy_wrapper(tsdn, arena, r_extent_hooks, extent, 0, extent_size_get(extent))) {
+			    /* 将extent放入extents_muzzy中 */
+				extents_dalloc(tsdn, arena, r_extent_hooks, &arena->extents_muzzy, extent);
+				arena_background_thread_inactivity_check(tsdn, arena, is_background_thread);
+				break;
+			}
+			/* Fall through. */
+		case extent_state_muzzy:
+            /* muzzy -> retained */
+			extent_dalloc_wrapper(tsdn, arena, r_extent_hooks, extent);
+			break;
+		case extent_state_retained:
+		default:
+			not_reached();
+		}
+	}
+	return npurged;
+}
+```
+
+
+
+```c
+/*
+ * @param extent
+ */
+void
+extent_dalloc_wrapper(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extent_t *extent) {
+
+	/* Avoid calling the default extent_dalloc unless have to. */
+	if (*r_extent_hooks != &extent_hooks_default || extent_may_dalloc()) {
+		/*
+		 * Deregister first to avoid a race with other allocating
+		 * threads, and reregister if deallocation fails.
+		 */
+		extent_deregister(tsdn, extent); /* 断开extent和tsdn的联系 */
+		if (!extent_dalloc_wrapper_try(tsdn, arena, r_extent_hooks, extent)) {
+			return;
+		}
+		extent_reregister(tsdn, extent);
+	}
+    /* 下面只是解除映射关系而已,并不回收内存 */
+	if (*r_extent_hooks != &extent_hooks_default) {
+		extent_hook_pre_reentrancy(tsdn, arena);
+	}
+	/* Try to decommit; purge if that fails. */
+	bool zeroed;
+	if (!extent_committed_get(extent)) {
+		zeroed = true;
+	} else if (!extent_decommit_wrapper(tsdn, arena, r_extent_hooks, extent,
+	    0, extent_size_get(extent))) { /* 尝试执行decommit回调 */
+		zeroed = true;
+	} else if ((*r_extent_hooks)->purge_forced != NULL &&
+	    !(*r_extent_hooks)->purge_forced(*r_extent_hooks,
+	    extent_base_get(extent), extent_size_get(extent), 0,
+	    extent_size_get(extent), arena_ind_get(arena))) { /* 如果decommit失败,会执行force purge */
+		zeroed = true;
+	} else if (extent_state_get(extent) == extent_state_muzzy ||
+	    ((*r_extent_hooks)->purge_lazy != NULL &&
+	    !(*r_extent_hooks)->purge_lazy(*r_extent_hooks,
+	    extent_base_get(extent), extent_size_get(extent), 0,
+	    extent_size_get(extent), arena_ind_get(arena)))) {
+		zeroed = false;
+	} else {
+		zeroed = false;
+	}
+	if (*r_extent_hooks != &extent_hooks_default) {
+		extent_hook_post_reentrancy(tsdn);
+	}
+	extent_zeroed_set(extent, zeroed);
+    /* 将extent放入extents_retained链表 */
+	extent_record(tsdn, arena, r_extent_hooks, &arena->extents_retained, extent, false);
+}
+```
+
+如果按照上面的回调执行回来,其实`*r_extent_hooks`为`extent_hooks_default`,因此下面的`extent_decommit_wrapper`其实会调用`extent_hooks_default->decommit`,也就是`extent_decommit_default`函数:
+
+```c
+/* 执行extent的decommit操作,所谓decommit,一种实现是将对应的内存区域标记为不可访问
+ * 但是并不回收虚拟内存
+ * @param arena extent依附的arena
+ * @param extent
+ * @param offset 偏移量
+ * @param length 长度
+ * @return 如果执行成功,返回true,否则返回false
+ */
+bool
+extent_decommit_wrapper(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extent_t *extent, size_t offset,
+    size_t length) {
+
+	extent_hooks_assure_initialized(arena, r_extent_hooks);
+
+	if (*r_extent_hooks != &extent_hooks_default) {
+		extent_hook_pre_reentrancy(tsdn, arena);
+	}
+    /* 可以参照extent_decommit_default */
+	bool err = ((*r_extent_hooks)->decommit == NULL ||
+	    (*r_extent_hooks)->decommit(*r_extent_hooks,
+	    extent_base_get(extent), extent_size_get(extent), offset, length,
+	    arena_ind_get(arena)));
+	if (*r_extent_hooks != &extent_hooks_default) {
+		extent_hook_post_reentrancy(tsdn);
+	}
+	extent_committed_set(extent, extent_committed_get(extent) && err);
+	return err;
+}
+```
+
+我们稍微追踪一下`extent_decommit_default`:
+
+```c
+static bool
+pages_commit_impl(void *addr, size_t size, bool commit) {
+	if (os_overcommits) {
+		return true;
+	}
+	
+    /* 关于PAGES_PROT_DECOMMIT,也就是使得这一片虚拟内存无法被访问 */
+    int prot = commit ? PAGES_PROT_COMMIT : PAGES_PROT_DECOMMIT;
+    void *result = mmap(addr, size, prot, mmap_flags | MAP_FIXED, -1, 0);
+    if (result == MAP_FAILED) {
+        return true;
+    }
+    if (result != addr) {
+        /*
+	     * We succeeded in mapping memory, but not in the right
+	     * place.
+		 */
+        os_pages_unmap(result, size);
+        return true;
+    }
+    return false;
+}
+
+bool
+pages_decommit(void *addr, size_t size) {
+	return pages_commit_impl(addr, size, false);
+}
+
+/* 其实执行的就是unmap操作 */
+static bool
+extent_decommit_default(extent_hooks_t *extent_hooks, void *addr, size_t size,
+    size_t offset, size_t length, unsigned arena_ind) {
+	return pages_decommit((void *)((uintptr_t)addr + (uintptr_t)offset), length);
+}
+```
+
+### extent合并
+
+```c
+/*
+ * Does the metadata management portions of putting an unused extent into the
+ * given extents_t (coalesces, deregisters slab interiors, the heap operations).
+ */
+static void
+extent_record(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
+    extents_t *extents, extent_t *extent, bool growing_retained) {
+	rtree_ctx_t rtree_ctx_fallback;
+	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+
+	malloc_mutex_lock(tsdn, &extents->mtx);
+	extent_hooks_assure_initialized(arena, r_extent_hooks);
+
+	extent_szind_set(extent, SC_NSIZES);
+	if (extent_slab_get(extent)) {
+		extent_interior_deregister(tsdn, rtree_ctx, extent);
+		extent_slab_set(extent, false);
+	}
+
+	if (!extents->delay_coalesce) { /* 如果无需延迟合并,那么就立马尝试合并 */
+		extent = extent_try_coalesce(tsdn, arena, r_extent_hooks,
+		    rtree_ctx, extents, extent, NULL, growing_retained);
+	} else if (extent_size_get(extent) >= SC_LARGE_MINCLASS) {
+		assert(extents == &arena->extents_dirty);
+		/* Always coalesce large extents eagerly. */
+        /* extent合并 */
+		bool coalesced;
+		do {
+			assert(extent_state_get(extent) == extent_state_active);
+			extent = extent_try_coalesce_large(tsdn, arena,
+			    r_extent_hooks, rtree_ctx, extents, extent,
+			    &coalesced, growing_retained);
+		} while (coalesced);
+		if (extent_size_get(extent) >= oversize_threshold) {
+			/* Shortcut to purge the oversize extent eagerly. */
+			malloc_mutex_unlock(tsdn, &extents->mtx);
+            /* 如果太大,就直接进行回收 */
+			arena_decay_extent(tsdn, arena, r_extent_hooks, extent);
+			return;
+		}
+	}
+	extent_deactivate_locked(tsdn, arena, extents, extent);
+
+	malloc_mutex_unlock(tsdn, &extents->mtx);
+}
+```
+
+
+
+```c
+static extent_t *
+extent_try_coalesce(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, rtree_ctx_t *rtree_ctx, extents_t *extents,
+    extent_t *extent, bool *coalesced, bool growing_retained) {
+	return extent_try_coalesce_impl(tsdn, arena, r_extent_hooks, rtree_ctx,
+	    extents, extent, coalesced, growing_retained, false);
+}
+```
+
+`extent_try_coalesce_impl`用于尝试合并`extent`:
+
+```c
+/*
+ * @param extent 尝试合并的extent
+ */
+static extent_t *
+extent_try_coalesce_impl(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, rtree_ctx_t *rtree_ctx, extents_t *extents,
+    extent_t *extent, bool *coalesced, bool growing_retained,
+    bool inactive_only) {
+	/*
+	 * We avoid checking / locking inactive neighbors for large size
+	 * classes, since they are eagerly coalesced on deallocation which can
+	 * cause lock contention.
+	 */
+	/*
+	 * Continue attempting to coalesce until failure, to protect against
+	 * races with other threads that are thwarted by this one.
+	 */
+	bool again;
+	do {
+		again = false;
+
+		/* Try to coalesce forward. */
+        /* 获取下一个extent,extent_past_get(extent)尝试获取下一个extent所管理的首地址 */
+		extent_t *next = extent_lock_from_addr(tsdn, rtree_ctx, extent_past_get(extent), inactive_only);
+		if (next != NULL) { /* 尝试合并前后两个extent,也就是extent和next */
+			/*
+			 * extents->mtx only protects against races for
+			 * like-state extents, so call extent_can_coalesce()
+			 * before releasing next's pool lock.
+			 */
+			bool can_coalesce = extent_can_coalesce(arena, extents, extent, next);
+
+			extent_unlock(tsdn, next);
+
+			if (can_coalesce && !extent_coalesce(tsdn, arena,
+			    r_extent_hooks, extents, extent, next, true,
+			    growing_retained)) {
+				if (extents->delay_coalesce) {
+					/* Do minimal coalescing. */
+					*coalesced = true;
+					return extent;
+				}
+				again = true;
+			}
+		}
+
+		/* Try to coalesce backward. */
+		extent_t *prev = extent_lock_from_addr(tsdn, rtree_ctx, extent_before_get(extent), inactive_only);
+		if (prev != NULL) {
+			bool can_coalesce = extent_can_coalesce(arena, extents, extent, prev);
+			extent_unlock(tsdn, prev);
+			if (can_coalesce && !extent_coalesce(tsdn, arena,
+			    r_extent_hooks, extents, extent, prev, false,
+			    growing_retained)) {
+				extent = prev;
+				if (extents->delay_coalesce) {
+					/* Do minimal coalescing. */
+					*coalesced = true;
+					return extent;
+				}
+				again = true;
+			}
+		}
+	} while (again);
+
+	if (extents->delay_coalesce) {
+		*coalesced = false;
+	}
+	return extent;
+}
+```
+
+`extent_past_get`尝试获取`extent`管理的地址空间之后的地址空间的地址,`extent_before_get`尝试获取`extent`管理的地址空间之前的地址.
+
+```c
+static inline void *
+extent_past_get(const extent_t *extent) {
+	return (void *)((uintptr_t)extent_base_get(extent) +
+	    extent_size_get(extent));
+}
+
+static inline void *
+extent_before_get(const extent_t *extent) {
+	return (void *)((uintptr_t)extent_base_get(extent) - PAGE);
+}
+```
+
+`extent_can_coalesce`用于判断两个`extent`是否可以合并:
+
+```c
+/* 判断两个extent是否可以合并
+ * @param arena 第一个extnet所属的arena
+ * @param inner 第一个extent
+ * @param outer 第二个extent
+ */
+static bool
+extent_can_coalesce(arena_t *arena, extents_t *extents, const extent_t *inner, const extent_t *outer) {
+	if (extent_arena_get(outer) != arena) { /* extent属于不同arena,不能进行合并 */
+		return false;
+	}
+	assert(extent_state_get(inner) == extent_state_active);
+	if (extent_state_get(outer) != extents->state) { /* 两个extent位于不同的extents heap,不能合并 */
+		return false;
+	}
+	if (extent_committed_get(inner) != extent_committed_get(outer)) { /* commit状态不一致,不能合并 */
+		return false;
+	}
+	return true;
+}
+```
+
+在确定了可以合并之后,立马进行合并操作:
+
+```c
+/* extent合并
+ * @param inner 第一个extent
+ * @param outer 第二个extent
+ * @param forward 顺序, forward为true,表示inner -> outer,否则 outer -> inner
+ */
+static bool
+extent_coalesce(tsdn_t *tsdn, arena_t *arena, extent_hooks_t **r_extent_hooks,
+    extents_t *extents, extent_t *inner, extent_t *outer, bool forward,
+    bool growing_retained) {
+
+	extent_activate_locked(tsdn, arena, extents, outer);
+	malloc_mutex_unlock(tsdn, &extents->mtx);
+	bool err = extent_merge_impl(tsdn, arena, r_extent_hooks,
+	    forward ? inner : outer, forward ? outer : inner, growing_retained);
+	malloc_mutex_lock(tsdn, &extents->mtx);
+
+	if (err) {
+		extent_deactivate_locked(tsdn, arena, extents, outer);
+	}
+
+	return err;
+}
+```
+
+`extent_merge_impl`做实际的合并操作,它做的主要工作是,更新`rtree`的信息.
+
+```c
+/* 将a与b两个extent进行合并,需要保证a这个extent管理的地址空间在b这个extent管理的地址空间之前
+ *
+ */
+static bool
+extent_merge_impl(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extent_t *a, extent_t *b,
+    bool growing_retained) {
+	assert(extent_base_get(a) < extent_base_get(b));
+	extent_hooks_assure_initialized(arena, r_extent_hooks);
+
+	if ((*r_extent_hooks)->merge == NULL || extent_head_no_merge(a, b)) {
+		return true;
+	}
+
+	bool err;
+	if (*r_extent_hooks == &extent_hooks_default) {
+		/* Call directly to propagate tsdn. */
+		err = extent_merge_default_impl(extent_base_get(a), extent_base_get(b));
+	} else {
+		extent_hook_pre_reentrancy(tsdn, arena);
+		err = (*r_extent_hooks)->merge(*r_extent_hooks,
+		    extent_base_get(a), extent_size_get(a), extent_base_get(b),
+		    extent_size_get(b), extent_committed_get(a),
+		    arena_ind_get(arena));
+		extent_hook_post_reentrancy(tsdn);
+	}
+
+	if (err) {
+		return true;
+	}
+
+	/*
+	 * The rtree writes must happen while all the relevant elements are
+	 * owned, so the following code uses decomposed helper functions rather
+	 * than extent_{,de}register() to do things in the right order.
+	 */
+	rtree_ctx_t rtree_ctx_fallback;
+	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	rtree_leaf_elm_t *a_elm_a, *a_elm_b, *b_elm_a, *b_elm_b;
+	extent_rtree_leaf_elms_lookup(tsdn, rtree_ctx, a, true, false, &a_elm_a, &a_elm_b);
+	extent_rtree_leaf_elms_lookup(tsdn, rtree_ctx, b, true, false, &b_elm_a, &b_elm_b);
+	extent_lock2(tsdn, a, b);
+	if (a_elm_b != NULL) {
+        /* 这里做的是清零工作,相当于将a_elem_b记录的a的信息抹去 */
+		rtree_leaf_elm_write(tsdn, &extents_rtree, a_elm_b, NULL, SC_NSIZES, false);
+	}
+	if (b_elm_b != NULL) {
+        /* 这里做的是清零工作,相当于将b_elem_b记录的b的信息抹去 */
+		rtree_leaf_elm_write(tsdn, &extents_rtree, b_elm_a, NULL, SC_NSIZES, false);
+	} else {
+		b_elm_b = b_elm_a;
+	}
+    /* 将a作为新的extent,b会被回收 */
+	extent_size_set(a, extent_size_get(a) + extent_size_get(b)); /* a管理的地址空间大小为两者之和 */
+	extent_szind_set(a, SC_NSIZES);
+	extent_sn_set(a, (extent_sn_get(a) < extent_sn_get(b)) ?
+	    extent_sn_get(a) : extent_sn_get(b)); /* 取小的序列值 */
+	extent_zeroed_set(a, extent_zeroed_get(a) && extent_zeroed_get(b));
+    /* 更新rtree,重新记录下a的信息 */
+	extent_rtree_write_acquired(tsdn, a_elm_a, b_elm_b, a, SC_NSIZES, false);
+
+	extent_unlock2(tsdn, a, b);
+	extent_dalloc(tsdn, extent_arena_get(b), b);
+	return false;
+}
+```
+
+
+

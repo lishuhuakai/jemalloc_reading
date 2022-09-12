@@ -33,7 +33,7 @@ struct tcache_s {
 	 * footprint here.
 	 */
 	/* Lets us track all the tcaches in an arena. */
-	ql_elm(tcache_t) link;
+	ql_elm(tcache_t) link; /* 将arena上所有的tcache通过指针连接起来 */
 
 	/* Logically scoped to tsd, but put here for cache layout reasons. */
 	ql_elm(tsd_t) tsd_link;

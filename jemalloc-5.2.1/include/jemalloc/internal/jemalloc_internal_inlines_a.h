@@ -81,9 +81,9 @@ arena_tdata_get(tsd_t *tsd, unsigned ind, bool refresh_if_missing) {
 	return arena_tdata_get_hard(tsd, ind);
 }
 
-/* »ñÈ¡arena
- * @param tsdn tsd¾ä±ú
- * @param init_if_missing Èç¹ûÃ»ÕÒµ½,¾Í³õÊ¼»¯
+/* è·å–arena
+ * @param tsdn tsdå¥æŸ„
+ * @param init_if_missing å¦‚æœæ²¡æ‰¾åˆ°,å°±åˆå§‹åŒ–
  */
 static inline arena_t *
 arena_get(tsdn_t *tsdn, unsigned ind, bool init_if_missing) {

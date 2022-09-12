@@ -70,7 +70,7 @@ struct bin_s {
 	 * slabcur is reassigned, the previous slab must be deallocated or
 	 * inserted into slabs_{nonfull,full}.
 	 */
-	extent_t		*slabcur;
+	extent_t		*slabcur; /* 当前正在使用的slab */
 
 	/*
 	 * Heap of non-full slabs.  This heap is used to assure that new

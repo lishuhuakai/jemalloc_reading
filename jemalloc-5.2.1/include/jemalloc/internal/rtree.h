@@ -15,11 +15,13 @@
  */
 
 /* Number of high insignificant bits. */
+/* LG_SIZEOF_PTR -- 64位系统下,大致为8字节,因此LG_SIZEOF_PTR为3, 如果LG_VADDR为64,则RTREE_NHIB为
+ * (1 << 6) - 64 = 0, LG_VADDR为48的话,RTREE_NHIB为16 */
 #define RTREE_NHIB ((1U << (LG_SIZEOF_PTR+3)) - LG_VADDR)
 /* Number of low insigificant bits. */
-#define RTREE_NLIB LG_PAGE
+#define RTREE_NLIB LG_PAGE /* PAGE大概占用了12bit,也就是4k */
 /* Number of significant bits. */
-#define RTREE_NSB (LG_VADDR - RTREE_NLIB)
+#define RTREE_NSB (LG_VADDR - RTREE_NLIB) /* 有用的bit位数,64位系统下为52bit */
 /* Number of levels in radix tree. */
 #if RTREE_NSB <= 10
 #  define RTREE_HEIGHT 1
@@ -39,10 +41,11 @@
 #define RTREE_LEAFKEY_INVALID ((uintptr_t)1)
 
 typedef struct rtree_node_elm_s rtree_node_elm_t;
-struct rtree_node_elm_s {
+struct rtree_node_elm_s { /* 基数树的中间节点 */
 	atomic_p_t	child; /* (rtree_{node,leaf}_elm_t *) */
 };
 
+/* 基数树叶子节点 */
 struct rtree_leaf_elm_s {
 #ifdef RTREE_LEAF_COMPACT
 	/*
@@ -54,11 +57,14 @@ struct rtree_leaf_elm_s {
 	 * x: index
 	 * e: extent
 	 * b: slab
+	 * 假定是一个64位的系统上,我们仅仅使用了48bit就可以表示三种信息,index占用了8bit
+	 * extent占用了28bit, slab使用1bit足矣
 	 *
 	 *   00000000 xxxxxxxx eeeeeeee [...] eeeeeeee eeee000b
 	 */
 	atomic_p_t	le_bits;
 #else
+    /* 这里属于不节省内存的版本 */
 	atomic_p_t	le_extent; /* (extent_t *) */
 	atomic_u_t	le_szind; /* (szind_t) */
 	atomic_b_t	le_slab; /* (bool) */
@@ -68,10 +74,12 @@ struct rtree_leaf_elm_s {
 typedef struct rtree_level_s rtree_level_t;
 struct rtree_level_s {
 	/* Number of key bits distinguished by this level. */
+    /* 在这一个层次(level),用于区分这个层次所使用的bit数目 */
 	unsigned		bits;
 	/*
 	 * Cumulative number of key bits distinguished by traversing to
 	 * corresponding tree level.
+	 * Cumulative number -- 累计数
 	 */
 	unsigned		cumbits;
 };
@@ -79,9 +87,10 @@ struct rtree_level_s {
 typedef struct rtree_s rtree_t;
 /* Radix Tree 基数树 */
 struct rtree_s {
-	malloc_mutex_t		init_lock;
+	malloc_mutex_t		init_lock; /* 互斥锁 */
 	/* Number of elements based on rtree_levels[0].bits. */
 #if RTREE_HEIGHT > 1
+    /* 中间节点,注意,这里的数组非常庞大,在64位系统之上,有1U << (52/3),也就是131072项 */
 	rtree_node_elm_t	root[1U << (RTREE_NSB/RTREE_HEIGHT)];
 #else
 	rtree_leaf_elm_t	root[1U << (RTREE_NSB/RTREE_HEIGHT)];
@@ -95,15 +104,20 @@ struct rtree_s {
  * level.
  */
 static const rtree_level_t rtree_levels[] = {
-#if RTREE_HEIGHT == 1
+#if RTREE_HEIGHT == 1 /* 基数树仅有1层 */
 	{RTREE_NSB, RTREE_NHIB + RTREE_NSB}
-#elif RTREE_HEIGHT == 2
+#elif RTREE_HEIGHT == 2 /* 基数树仅有2层 */
+    /* {18, 34} => RTREE_NHIB为16, RTREE_NSB为36 */
 	{RTREE_NSB/2, RTREE_NHIB + RTREE_NSB/2},
+	/* {18, 52} */
 	{RTREE_NSB/2 + RTREE_NSB%2, RTREE_NHIB + RTREE_NSB}
-#elif RTREE_HEIGHT == 3
+#elif RTREE_HEIGHT == 3 /* 基数树有3层,以64bit的LG_VADDR为例, RTREE_NHIB为0 */
+     /* 第一层0-16bit,RTREE_NSB为52 ==> {17, 17}*/
 	{RTREE_NSB/3, RTREE_NHIB + RTREE_NSB/3},
+	/* 第二层17-33bit ==> {17, 34} */
 	{RTREE_NSB/3 + RTREE_NSB%3/2,
 	    RTREE_NHIB + RTREE_NSB/3*2 + RTREE_NSB%3/2},
+	 /* 第三层对应34-51bit ==> { 18, 52 } */
 	{RTREE_NSB/3 + RTREE_NSB%3 - RTREE_NSB%3/2, RTREE_NHIB + RTREE_NSB}
 #else
 #  error Unsupported rtree height
@@ -129,6 +143,7 @@ void rtree_delete(tsdn_t *tsdn, rtree_t *rtree);
 rtree_leaf_elm_t *rtree_leaf_elm_lookup_hard(tsdn_t *tsdn, rtree_t *rtree,
     rtree_ctx_t *rtree_ctx, uintptr_t key, bool dependent, bool init_missing);
 
+/* 获取叶子层的key(标识) */
 JEMALLOC_ALWAYS_INLINE uintptr_t
 rtree_leafkey(uintptr_t key) {
 	unsigned ptrbits = ZU(1) << (LG_SIZEOF_PTR+3);
@@ -136,25 +151,30 @@ rtree_leafkey(uintptr_t key) {
 	    rtree_levels[RTREE_HEIGHT-1].bits);
 	unsigned maskbits = ptrbits - cumbits;
 	uintptr_t mask = ~((ZU(1) << maskbits) - 1);
-	return (key & mask);
+	return (key & mask); /* 掩码操作,获取对应位置的bit */
 }
 
 JEMALLOC_ALWAYS_INLINE size_t
 rtree_cache_direct_map(uintptr_t key) {
-	unsigned ptrbits = ZU(1) << (LG_SIZEOF_PTR+3);
+	unsigned ptrbits = ZU(1) << (LG_SIZEOF_PTR+3); /* 64位系统中,这个值为64 */
 	unsigned cumbits = (rtree_levels[RTREE_HEIGHT-1].cumbits -
 	    rtree_levels[RTREE_HEIGHT-1].bits);
 	unsigned maskbits = ptrbits - cumbits;
 	return (size_t)((key >> maskbits) & (RTREE_CTX_NCACHE - 1));
 }
 
+/* 从key中提取出第level层的key(标识) */
 JEMALLOC_ALWAYS_INLINE uintptr_t
 rtree_subkey(uintptr_t key, unsigned level) {
-	unsigned ptrbits = ZU(1) << (LG_SIZEOF_PTR+3);
+    /* 以第0层为例,key要左移64 - 17 = 47bit
+     * 第1层,key要左移64-17-17 = 30bit
+     * 第2层,key要左移12bit
+     */
+	unsigned ptrbits = ZU(1) << (LG_SIZEOF_PTR+3); /* 64位系统中,这个值为64 */
 	unsigned cumbits = rtree_levels[level].cumbits;
-	unsigned shiftbits = ptrbits - cumbits;
+	unsigned shiftbits = ptrbits - cumbits; /* key要左移的位数 */
 	unsigned maskbits = rtree_levels[level].bits;
-	uintptr_t mask = (ZU(1) << maskbits) - 1;
+	uintptr_t mask = (ZU(1) << maskbits) - 1; /* 只要求获取对应的bit */
 	return ((key >> shiftbits) & mask);
 }
 
@@ -328,10 +348,11 @@ JEMALLOC_ALWAYS_INLINE rtree_leaf_elm_t *
 rtree_leaf_elm_lookup(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
     uintptr_t key, bool dependent, bool init_missing) {
 	assert(key != 0);
+    /* dependent和init_missing一定要有一个为false */
 	assert(!dependent || !init_missing);
 
 	size_t slot = rtree_cache_direct_map(key);
-	uintptr_t leafkey = rtree_leafkey(key);
+	uintptr_t leafkey = rtree_leafkey(key); /* 获取叶子层的key */
 	assert(leafkey != RTREE_LEAFKEY_INVALID);
 
 	/* Fast path: L1 direct mapped cache. */
@@ -344,6 +365,8 @@ rtree_leaf_elm_lookup(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 	/*
 	 * Search the L2 LRU cache.  On hit, swap the matching element into the
 	 * slot in L1 cache, and move the position in L2 up by 1.
+	 * 在L2 LRU cache中查找,如果命中的话,和L1 cache中的对应位置交换,总之就是为了加快下一次的
+	 * 匹配速度
 	 */
 #define RTREE_CACHE_CHECK_L2(i) do {					\
 	if (likely(rtree_ctx->l2_cache[i].leafkey == leafkey)) {	\
@@ -375,7 +398,7 @@ rtree_leaf_elm_lookup(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 	RTREE_CACHE_CHECK_L2(0);
 	/* Search the remaining cache elements. */
 	for (unsigned i = 1; i < RTREE_CTX_NCACHE_L2; i++) {
-		RTREE_CACHE_CHECK_L2(i);
+		RTREE_CACHE_CHECK_L2(i); /* 遍历每一个元素 */
 	}
 #undef RTREE_CACHE_CHECK_L2
 
@@ -383,12 +406,15 @@ rtree_leaf_elm_lookup(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx,
 	    dependent, init_missing);
 }
 
+/* 往基数树中添加表项
+ * @param rtree 基数树
+ */
 static inline bool
 rtree_write(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx, uintptr_t key,
     extent_t *extent, szind_t szind, bool slab) {
 	/* Use rtree_clear() to set the extent to NULL. */
 	assert(extent != NULL);
-
+    /* 首先查找 */
 	rtree_leaf_elm_t *elm = rtree_leaf_elm_lookup(tsdn, rtree, rtree_ctx,
 	    key, false, true);
 	if (elm == NULL) {
@@ -396,6 +422,7 @@ rtree_write(tsdn_t *tsdn, rtree_t *rtree, rtree_ctx_t *rtree_ctx, uintptr_t key,
 	}
 
 	assert(rtree_leaf_elm_extent_read(tsdn, rtree, elm, false) == NULL);
+    /* 更新elm->le_extent, elm->le_szind, ele->le_slab的值 */
 	rtree_leaf_elm_write(tsdn, rtree, elm, extent, szind, slab);
 
 	return false;

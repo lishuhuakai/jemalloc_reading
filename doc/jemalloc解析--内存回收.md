@@ -1,0 +1,457 @@
+`jemalloc`调用`je_free`来释放内存.
+
+```c
+JEMALLOC_EXPORT void
+je_free(void *ptr) {
+	if (!free_fastpath(ptr, 0, false)) {
+		free_default(ptr);
+	}
+}
+```
+
+`jemalloc`的内存回收,有两条路径,一条是快速内存回收,也就是调用函数`free_fastpath`,另外一条,走的是正常的回收路径,也就是调用函数`free_default`,这种方式速度可能比较慢.
+
+# 1. 快路径内存回收
+
+回收内存其实直接将内存块放入缓存即可,这个可以加速下一次的内存分配.
+
+```c
+/* 快速释放内存
+ * @param ptr 内存首地址
+ * @param size 内存大小
+ */
+JEMALLOC_ALWAYS_INLINE
+bool free_fastpath(void *ptr, size_t size, bool size_hint) {
+	tsd_t *tsd = tsd_get(false);
+	if (unlikely(!tsd || !tsd_fast(tsd))) {
+		return false;
+	}
+
+	tcache_t *tcache = tsd_tcachep_get(tsd);  /* 获取对应的tcache */
+	alloc_ctx_t alloc_ctx;
+	/*
+	 * If !config_cache_oblivious, we can check PAGE alignment to
+	 * detect sampled objects.  Otherwise addresses are
+	 * randomized, and we have to look it up in the rtree anyway.
+	 * See also isfree().
+	 */
+	if (!size_hint || config_cache_oblivious) {
+		rtree_ctx_t *rtree_ctx = tsd_rtree_ctx(tsd);
+        /* 读取内存块对应的extent信息,szind信息(内存块所属的级别),
+         * 注意,这里只在rtree_ctx的缓存中查找,没找到会返回false */
+		bool res = rtree_szind_slab_read_fast(tsd_tsdn(tsd), &extents_rtree,
+						      rtree_ctx, (uintptr_t)ptr,
+						      &alloc_ctx.szind, &alloc_ctx.slab);
+
+		/* Note: profiled objects will have alloc_ctx.slab set */
+		if (!res || !alloc_ctx.slab) {
+			return false;
+		}
+	} else {
+		/*
+		 * Check for both sizes that are too large, and for sampled objects.
+		 * Sampled objects are always page-aligned.  The sampled object check
+		 * will also check for null ptr.
+		 */
+		if (size > SC_LOOKUP_MAXCLASS || (((uintptr_t)ptr & PAGE_MASK) == 0)) {
+			return false;
+		}
+		alloc_ctx.szind = sz_size2index_lookup(size);
+	}
+
+	if (unlikely(ticker_trytick(&tcache->gc_ticker))) {
+		return false;
+	}
+    /* 获取对应的bin */
+	cache_bin_t *bin = tcache_small_bin_get(tcache, alloc_ctx.szind);
+	cache_bin_info_t *bin_info = &tcache_bin_info[alloc_ctx.szind];
+	if (!cache_bin_dalloc_easy(bin, bin_info, ptr)) {
+		return false;
+	}
+	return true;
+}
+```
+
+此函数首先尝试在`rtree_ctx`这个缓存中查找,看是否能找到此内存的相关信息(是否是小内存(`slab`)以及内存级别(`szind`)),如果找不到,就不能执行快路径内存释放.如果找到了,就尝试直接将要释放的内存缓存到`arena`的`tcache`的`cache_bin`之中.
+
+`cache_bin_dalloc_easy`函数直接将内存块放入`cache_bin`之中:
+
+```c
+/* 将ptr缓存到bin中
+ * @param bin_info 配置信息
+ * @return 如果成功,返回true,如果bin满了,返回false
+ */
+
+JEMALLOC_ALWAYS_INLINE bool
+cache_bin_dalloc_easy(cache_bin_t *bin, cache_bin_info_t *bin_info, void *ptr) {
+	if (unlikely(bin->ncached == bin_info->ncached_max)) {
+		return false;
+	}
+	bin->ncached++;
+	*(bin->avail - bin->ncached) = ptr;
+	return true;
+}
+```
+
+# 2. 默认路径内存回收
+
+正常的内存回收,会走`free_default`流程:
+
+```c
+/* 走正常流程来释放内存
+ * @param ptr 内存首地址
+ */
+
+JEMALLOC_NOINLINE void
+free_default(void *ptr) {
+	if (likely(ptr != NULL)) {
+		/*
+		 * We avoid setting up tsd fully (e.g. tcache, arena binding)
+		 * based on only free() calls -- other activities trigger the
+		 * minimal to full transition.  This is because free() may
+		 * happen during thread shutdown after tls deallocation: if a
+		 * thread never had any malloc activities until then, a
+		 * fully-setup tsd won't be destructed properly.
+		 */
+		tsd_t *tsd = tsd_fetch_min();
+		check_entry_exit_locking(tsd_tsdn(tsd));
+
+		tcache_t *tcache;
+		if (likely(tsd_fast(tsd))) {
+			tsd_assert_fast(tsd);
+			/* Unconditionally get tcache ptr on fast path. */
+			tcache = tsd_tcachep_get(tsd); /* 获取arena的tcache */
+			ifree(tsd, ptr, tcache, false);
+		} else {
+			if (likely(tsd_reentrancy_level_get(tsd) == 0)) {
+				tcache = tcache_get(tsd);
+			} else {
+				tcache = NULL;
+			}
+			uintptr_t args_raw[3] = {(uintptr_t)ptr};
+            /* 从目前来看,hook_invoke_dalloc貌似没有被调用 */
+			hook_invoke_dalloc(hook_dalloc_free, ptr, args_raw);
+			ifree(tsd, ptr, tcache, true);
+		}
+		check_entry_exit_locking(tsd_tsdn(tsd));
+	}
+}
+```
+
+最终我们会走`ifree`来释放内存:
+
+```c
+/* 内存释放
+ * @param ptr 内存首地址
+ */
+JEMALLOC_ALWAYS_INLINE void
+ifree(tsd_t *tsd, void *ptr, tcache_t *tcache, bool slow_path) {
+	if (!slow_path) {
+		tsd_assert_fast(tsd);
+	}
+	check_entry_exit_locking(tsd_tsdn(tsd));
+	if (tsd_reentrancy_level_get(tsd) != 0) {
+		assert(slow_path);
+	}
+
+	alloc_ctx_t alloc_ctx;
+	rtree_ctx_t *rtree_ctx = tsd_rtree_ctx(tsd); /* 获取arena对应的基数树缓存结构体rtree_ctx */
+    /* 读取指针指向的内存块的信息,包括属于哪一个extent,内存大小级别(szind)以及是否用于小内存分配(slab) */
+	rtree_szind_slab_read(tsd_tsdn(tsd), &extents_rtree, rtree_ctx,
+	    (uintptr_t)ptr, true, &alloc_ctx.szind, &alloc_ctx.slab);
+
+	size_t usize;
+	if (likely(!slow_path)) {
+		idalloctm(tsd_tsdn(tsd), ptr, tcache, &alloc_ctx, false, false);
+	} else {
+		idalloctm(tsd_tsdn(tsd), ptr, tcache, &alloc_ctx, false, true);
+	}
+}
+```
+
+`ifree`读取完要释放的内存的信息之后,调用`idalloctm`来释放内存:
+
+```c
+/* 释放内存
+ * @parma tsdn
+ * @param ptr 释放的内存的首地址
+ * @param tcache 线程内存缓存池
+ * @param alloc_ctx 分配信息
+ */
+JEMALLOC_ALWAYS_INLINE void
+arena_dalloc(tsdn_t *tsdn, void *ptr, tcache_t *tcache,
+    alloc_ctx_t *alloc_ctx, bool slow_path) {
+
+	if (unlikely(tcache == NULL)) {
+		arena_dalloc_no_tcache(tsdn, ptr);
+		return;
+	}
+	szind_t szind;
+	bool slab;
+	rtree_ctx_t *rtree_ctx;
+	if (alloc_ctx != NULL) {
+		szind = alloc_ctx->szind;
+		slab = alloc_ctx->slab;
+	} else {
+		rtree_ctx = tsd_rtree_ctx(tsdn_tsd(tsdn));
+        /* 这里保证一定可以读取到相关信息 */
+		rtree_szind_slab_read(tsdn, &extents_rtree, rtree_ctx, (uintptr_t)ptr, true, &szind, &slab);
+	}
+
+	if (likely(slab)) { /* 小内存释放 */
+		/* Small allocation. */
+		tcache_dalloc_small(tsdn_tsd(tsdn), tcache, ptr, szind, slow_path);
+	} else { /* 大内存释放 */
+		arena_dalloc_large(tsdn, ptr, tcache, szind, slow_path);
+	}
+}
+
+/* 内存释放
+ * @param tsdn tsd句柄
+ * @param ptr 释放的内存的首地址
+ * @param tcache 缓存
+ * @param alloc_ctx 分配信息
+ */
+JEMALLOC_ALWAYS_INLINE void
+idalloctm(tsdn_t *tsdn, void *ptr, tcache_t *tcache, alloc_ctx_t *alloc_ctx,
+    bool is_internal, bool slow_path) {
+	arena_dalloc(tsdn, ptr, tcache, alloc_ctx, slow_path);
+}
+```
+
+## 2.1 通过tcache回收小内存
+
+如果内存块属于小内存(带有`slab`标记),那么调用`tcache_dalloc_small`用于释放小内存:
+
+```c
+JEMALLOC_ALWAYS_INLINE void
+tcache_dalloc_small(tsd_t *tsd, tcache_t *tcache, void *ptr, szind_t binind,
+    bool slow_path) {
+	cache_bin_t *bin;
+	cache_bin_info_t *bin_info;
+
+	assert(tcache_salloc(tsd_tsdn(tsd), ptr)<= SC_SMALL_MAXCLASS);
+
+	if (slow_path && config_fill && unlikely(opt_junk_free)) {
+		arena_dalloc_junk_small(ptr, &bin_infos[binind]);
+	}
+    /* 小内存优先释放到cache_bin中,方便下一次内存分配 */
+	bin = tcache_small_bin_get(tcache, binind);
+	bin_info = &tcache_bin_info[binind];
+	if (unlikely(!cache_bin_dalloc_easy(bin, bin_info, ptr))) {
+        /* 如果bin缓存的object的数目达到上限,那么要进行flush操作 */
+		tcache_bin_flush_small(tsd, tcache, bin, binind, (bin_info->ncached_max >> 1));
+		bool ret = cache_bin_dalloc_easy(bin, bin_info, ptr);
+		assert(ret);
+	}
+	tcache_event(tsd, tcache); /* 让gc_ticker减小,触发垃圾回收 */
+}
+```
+
+小内存优先放入`cache_bin`,方便后续快速分配,但是`cache_bin`是有容量上限的,如果缓存的内存块数目过多,就要先`flush`一部分内存,也就是调用`tcache_bin_flush_small`:
+
+```c
+/* 根据地址,反方向得到地址所属的extent */
+JEMALLOC_ALWAYS_INLINE extent_t *
+iealloc(tsdn_t *tsdn, const void *ptr) {
+	rtree_ctx_t rtree_ctx_fallback;
+	rtree_ctx_t *rtree_ctx = tsdn_rtree_ctx(tsdn, &rtree_ctx_fallback);
+	return rtree_extent_read(tsdn, &extents_rtree, rtree_ctx, (uintptr_t)ptr, true);
+}
+
+/* 内存回收
+ * @param tbin 需要执行flush操作的bin
+ * @param rem 需要保留的object的个数
+ */
+void
+tcache_bin_flush_small(tsd_t *tsd, tcache_t *tcache, cache_bin_t *tbin, szind_t binind, unsigned rem) {
+	bool merged_stats = false;
+
+	arena_t *arena = tcache->arena;
+	unsigned nflush = tbin->ncached - rem;
+	VARIABLE_ARRAY(extent_t *, item_extent, nflush);
+
+	/* Look up extent once per item. */
+	if (config_opt_safety_checks) {
+		tbin_extents_lookup_size_check(tsd_tsdn(tsd), tbin, binind, nflush, item_extent);
+	} else {
+		for (unsigned i = 0 ; i < nflush; i++) {
+             /* 根据ptr获得对应的extent,这里顺带提一句,如果我们释放了一个野指针,从iealloc多半是找不到extent,extent为NULL */
+			item_extent[i] = iealloc(tsd_tsdn(tsd), *(tbin->avail - 1 - i));
+		}
+	}
+	while (nflush > 0) {
+		/* Lock the arena bin associated with the first object. */
+		extent_t *extent = item_extent[0];
+		unsigned bin_arena_ind = extent_arena_ind_get(extent);
+		arena_t *bin_arena = arena_get(tsd_tsdn(tsd), bin_arena_ind, false);
+		unsigned binshard = extent_binshard_get(extent);
+		bin_t *bin = &bin_arena->bins[binind].bin_shards[binshard];
+
+		malloc_mutex_lock(tsd_tsdn(tsd), &bin->lock);
+		unsigned ndeferred = 0;
+		for (unsigned i = 0; i < nflush; i++) {
+			void *ptr = *(tbin->avail - 1 - i); /* 待释放的内存 */
+			extent = item_extent[i];
+
+			if (extent_arena_ind_get(extent) == bin_arena_ind
+			    && extent_binshard_get(extent) == binshard) {
+			    /* 进行内存回收工作 */
+				arena_dalloc_bin_junked_locked(tsd_tsdn(tsd), bin_arena, bin, binind, extent, ptr);
+			} else {
+				/*
+				 * This object was allocated via a different
+				 * arena bin than the one that is currently
+				 * locked.  Stash the object, so that it can be
+				 * handled in a future pass.
+				 */
+				*(tbin->avail - 1 - ndeferred) = ptr;
+				item_extent[ndeferred] = extent;
+				ndeferred++;
+			}
+		}
+		malloc_mutex_unlock(tsd_tsdn(tsd), &bin->lock);
+		arena_decay_ticks(tsd_tsdn(tsd), bin_arena, nflush - ndeferred);
+		nflush = ndeferred;
+	}
+
+	memmove(tbin->avail - rem, tbin->avail - tbin->ncached, rem * sizeof(void *));
+	tbin->ncached = rem;
+	if (tbin->ncached < tbin->low_water) {
+		tbin->low_water = tbin->ncached;
+	}
+}
+```
+
+内存回收的逻辑我们暂时不涉及,将会在后面的章节中详细讲述.
+
+## 2.2 回收大内存
+
+除了小内存,`jemalloc`针对大内存,也有专门的函数来处理,那就是`arena_dalloc_large`:
+
+```c
+/* 大内存释放
+ * @param ptr 待释放内存的首地址
+ * @param szind 大小等级
+ */
+JEMALLOC_ALWAYS_INLINE void
+arena_dalloc_large(tsdn_t *tsdn, void *ptr, tcache_t *tcache, szind_t szind, bool slow_path) {
+	if (szind < nhbins) {
+		if (config_prof && unlikely(szind < SC_NBINS)) {
+			arena_dalloc_promoted(tsdn, ptr, tcache, slow_path);
+		} else {
+			tcache_dalloc_large(tsdn_tsd(tsdn), tcache, ptr, szind, slow_path);
+		}
+	} else {
+        /* 根据地址,获取其对应的extent,因为内存大小足够大,可以保证,extent所指示的内存不会分成多块分配给上层应用 */
+		extent_t *extent = iealloc(tsdn, ptr); 
+		large_dalloc(tsdn, extent);
+	}
+}
+```
+
+如果内存大小相对较小,会先放入`tcache`之中,如果内存过大,那就只能放入`arena->extents_dirty`链表中了.
+
+### 2.2.1 通过tcache回收大内存
+
+直接将回收的内存放入`tcache->bins_large[binind]`指示的`cache_bin`之中.
+
+```c
+JEMALLOC_ALWAYS_INLINE cache_bin_t *
+tcache_large_bin_get(tcache_t *tcache, szind_t binind) {
+	return &tcache->bins_large[binind - SC_NBINS];
+}
+
+JEMALLOC_ALWAYS_INLINE void
+tcache_dalloc_large(tsd_t *tsd, tcache_t *tcache, void *ptr, szind_t binind,
+    bool slow_path) {
+	cache_bin_t *bin;
+	cache_bin_info_t *bin_info;
+
+	if (slow_path && config_fill && unlikely(opt_junk_free)) {
+		large_dalloc_junk(ptr, sz_index2size(binind));
+	}
+
+	bin = tcache_large_bin_get(tcache, binind);
+	bin_info = &tcache_bin_info[binind];
+	if (unlikely(bin->ncached == bin_info->ncached_max)) {
+        /* 如果缓存值达到上限,要触发回收流程 */
+		tcache_bin_flush_large(tsd, bin, binind,
+		    (bin_info->ncached_max >> 1), tcache);
+	}
+	bin->ncached++;
+	*(bin->avail - bin->ncached) = ptr;
+	tcache_event(tsd, tcache);
+}
+```
+
+### 2.2.2 通过arena回收内存
+
+足够大的内存要放入`arena->extents_dirty`缓存一段时间,并不会立即还给操作系统.当然,这也是为了加快后续的内存分配速度.
+
+```c
+void
+arena_extent_dalloc_large_prep(tsdn_t *tsdn, arena_t *arena, extent_t *extent) {
+	/* 修改arena->nactive的计数值(活跃的extents中页的个数),也就是减去extent所占用的页的数目 */
+	arena_nactive_sub(arena, extent_size_get(extent) >> LG_PAGE);
+}
+
+/*
+ * junked_locked indicates whether the extent's data have been junk-filled, and
+ * whether the arena's large_mtx is currently held.
+ */
+static void
+large_dalloc_prep_impl(tsdn_t *tsdn, arena_t *arena, extent_t *extent,
+    bool junked_locked) {
+	if (!junked_locked) {
+		/* See comments in arena_bin_slabs_full_insert(). */
+		if (!arena_is_auto(arena)) {
+			malloc_mutex_lock(tsdn, &arena->large_mtx);
+			extent_list_remove(&arena->large, extent);
+			malloc_mutex_unlock(tsdn, &arena->large_mtx);
+		}
+        /* 在内存中填充垃圾值 */
+		large_dalloc_maybe_junk(extent_addr_get(extent), extent_usize_get(extent));
+	} else {
+		/* Only hold the large_mtx if necessary. */
+		if (!arena_is_auto(arena)) {
+			malloc_mutex_assert_owner(tsdn, &arena->large_mtx);
+			extent_list_remove(&arena->large, extent);
+		}
+	}
+	arena_extent_dalloc_large_prep(tsdn, arena, extent);
+}
+
+/* arena内存释放
+ * @param extent 待释放的extent
+ */
+void
+arena_extents_dirty_dalloc(tsdn_t *tsdn, arena_t *arena,
+    extent_hooks_t **r_extent_hooks, extent_t *extent) {
+    /* 将extent放入arena->extents_dirty队列 */
+	extents_dalloc(tsdn, arena, r_extent_hooks, &arena->extents_dirty, extent);
+	if (arena_dirty_decay_ms_get(arena) == 0) { /* 立马进行内存回收工作 */
+		arena_decay_dirty(tsdn, arena, false, true);
+	} else {
+		arena_background_thread_inactivity_check(tsdn, arena, false);
+	}
+}
+
+static void
+large_dalloc_finish_impl(tsdn_t *tsdn, arena_t *arena, extent_t *extent) {
+	extent_hooks_t *extent_hooks = EXTENT_HOOKS_INITIALIZER;
+	arena_extents_dirty_dalloc(tsdn, arena, &extent_hooks, extent);
+}
+
+/* 大内存的回收,将extent放入arena->extents_dirty中
+ * @param extent
+ */
+void
+large_dalloc(tsdn_t *tsdn, extent_t *extent) {
+	arena_t *arena = extent_arena_get(extent);
+	large_dalloc_prep_impl(tsdn, arena, extent, false);
+	large_dalloc_finish_impl(tsdn, arena, extent);
+	arena_decay_tick(tsdn, arena);
+}
+```
+

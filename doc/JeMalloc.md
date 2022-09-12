@@ -90,7 +90,7 @@ JeMalloc 是一款内存分配器，与其它内存分配器相比，它最大�
 
 全局唯一的存放每个 `extent` 信息的 Radix Tree，以 `extent->e_addr` 即 `uintptr_t` 为 key，以我的机器为例，`uintptr_t` 为64位（8字节）， `rtree` 的高度为3，由于 `extent->e_addr` 是 `page(1 << 12)` 对齐的，也就是说需要 64 - 12 = 52 位即可确定在树中的位置，每一层分别通过第0-16位，17-33位，34-51位来进行访问。
 
-![img](https://pic1.zhimg.com/80/v2-92f9c4741a626e4a48a9ca987d36b82c_720w.jpg)
+![img](pic/JeMalloc/v2-92f9c4741a626e4a48a9ca987d36b82c_720w.jpg)
 
 ## cache_bin
 
@@ -100,7 +100,7 @@ JeMalloc 是一款内存分配器，与其它内存分配器相比，它最大�
 - `cache_bin.ncached` : 当前 `cache_bin` 存放的缓存数量
 - `cache_bin.avail` : 可直接用于分配的内存，从左往右依次分配（注意这里的寻址方式）
 
-![img](https://pic1.zhimg.com/80/v2-4ce3efe4b89f927df4b4c0cfbd588558_720w.jpg)
+![img](pic/JeMalloc/v2-4ce3efe4b89f927df4b4c0cfbd588558_720w.jpg)
 
 
 
@@ -136,7 +136,7 @@ Thread Specific Data，每个线程独有，用于存放与这个线程相关的
 
 简单来说，这个流程是这样的，`cache_bin -> slab -> slabs_nonfull -> extents_dirty -> extents_muzzy -> extents_retained -> kernal`。
 
-![img](https://pic1.zhimg.com/80/v2-07d44c859efbc6ac177b27793acb96e8_720w.jpg)
+![img](pic/JeMalloc/v2-07d44c859efbc6ac177b27793acb96e8_720w.jpg)
 
 
 
@@ -220,7 +220,7 @@ Thread Specific Data，每个线程独有，用于存放与这个线程相关的
 
 对于 N 个需要 gc 的 `page` 来说，并不是简单地每0.05s处理 N/200 个 `page`，jemalloc 引入了 **`Smoothstep`**（主要用于计算机图形学）来获得更加平滑的 gc 机制，这也是 jemalloc 非常有意思的一个点。
 
-![img](https://pic4.zhimg.com/80/v2-43e9270ba583c513327a874d0f5fbb63_720w.jpg)
+![img](pic/JeMalloc/v2-43e9270ba583c513327a874d0f5fbb63_720w.jpg)
 
 jemalloc 内部维护了一个长度为200的数组，用来计算在10s的 gc 周期内每个时间点应该对多少 `page` 进行 gc。这样保证两次 gc 的时间段内产生的需要 gc 的 `page` 都会以图中绿色线条（默认使用 smootherstep）的变化曲线在10s的周期内从 N 减为 0（从右往左）。
 
@@ -254,7 +254,7 @@ JeMalloc 保证内部碎片在20%左右。对于绝大多数 `size_class` 来说
 
 对于两组 group 来说：
 
-![img](https://pic3.zhimg.com/80/v2-31af697e86d532b7b5f7320f13ec162a_720w.jpg)
+![img](pic/JeMalloc/v2-31af697e86d532b7b5f7320f13ec162a_720w.jpg)
 
 取相差最大的第一组的最后一个和第二组的第一个，内存碎片约为  ![[公式]](https://www.zhihu.com/equation?tex=%5Cfrac%7B5+%2A+2%5E%7By-1%7D+-+8+%2A+2%5E%7By-2%7D+%2B+1%7D%7B5+%2A+2%5E%7By-1%7D%7D) 约等于 20%。
 

@@ -16,7 +16,9 @@ typedef enum {
 	extent_state_retained = 3
 } extent_state_t;
 
-/* Extent (span of pages).  Use accessor functions for e_* fields. */
+/* Extent (span of pages).  Use accessor functions for e_* fields.
+ * extent用于管理jemalloc内存块,每一个内存块的代销可以是(N * page_size),其中N大于等于1
+ */
 struct extent_s {
 	/*
 	 * Bitfield containing several fields:
@@ -91,7 +93,7 @@ struct extent_s {
 	 *     wrap-around, e.g. when splitting an extent and assigning the same
 	 *     serial number to both resulting adjacent extents.
 	 */
-	uint64_t		e_bits;
+	uint64_t		e_bits; /* 64bit的flag */
 #define MASK(CURRENT_FIELD_WIDTH, CURRENT_FIELD_SHIFT) ((((((uint64_t)0x1U) << (CURRENT_FIELD_WIDTH)) - 1)) << (CURRENT_FIELD_SHIFT))
 
 #define EXTENT_BITS_ARENA_WIDTH  MALLOCX_ARENA_BITS /* 12bit */
@@ -133,12 +135,12 @@ struct extent_s {
 #define EXTENT_BITS_IS_HEAD_WIDTH 1
 #define EXTENT_BITS_IS_HEAD_SHIFT  (EXTENT_BITS_BINSHARD_WIDTH + EXTENT_BITS_BINSHARD_SHIFT)
 #define EXTENT_BITS_IS_HEAD_MASK  MASK(EXTENT_BITS_IS_HEAD_WIDTH, EXTENT_BITS_IS_HEAD_SHIFT)
-
+/* 序列值 */
 #define EXTENT_BITS_SN_SHIFT   (EXTENT_BITS_IS_HEAD_WIDTH + EXTENT_BITS_IS_HEAD_SHIFT)
 #define EXTENT_BITS_SN_MASK  (UINT64_MAX << EXTENT_BITS_SN_SHIFT)
 
 	/* Pointer to the extent that this structure is responsible for. */
-	void			*e_addr;
+	void			*e_addr; /* extent管理的内存块的起始地址 */
 
 	union {
 		/*
@@ -150,7 +152,7 @@ struct extent_s {
 		 */
 		size_t			e_size_esn;
 	#define EXTENT_SIZE_MASK	((size_t)~(PAGE-1))
-	#define EXTENT_ESN_MASK		((size_t)PAGE-1)
+	#define EXTENT_ESN_MASK		((size_t)PAGE-1) /* 12bit */
 		/* Base extent size, which may not be a multiple of PAGE. */
 		size_t			e_bsize;
 	};
@@ -172,7 +174,7 @@ struct extent_s {
 
 	union {
 		/* Small region slab metadata. */
-		arena_slab_data_t	e_slab_data; /* 元数据   */
+		arena_slab_data_t	e_slab_data; /* 元数据,其实就是分配位图      */
 
 		/* Profiling data, used for large objects. */
 		struct {

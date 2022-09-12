@@ -1871,7 +1871,7 @@ struct static_opts_s {
 	 * summary of several other static (or at least, static after program
 	 * initialization) options.
 	 */
-	bool slow;
+	bool slow; /* 如果我们配置来跳过一些耗时的操作,那么这个值为false */
 	/*
 	 * Return size.
 	 */
@@ -1903,7 +1903,7 @@ static_opts_init(static_opts_t *static_opts) {
 
 typedef struct dynamic_opts_s dynamic_opts_t;
 struct dynamic_opts_s {
-	void **result;
+	void **result; /* 内存分配的结构 */
 	size_t usize;
 	size_t num_items; /* 要分配的item的个数 */
 	size_t item_size; /* 每一个item的大小 */
@@ -2070,7 +2070,9 @@ imalloc_body(static_opts_t *sopts, dynamic_opts_t *dopts, tsd_t *tsd) {
 	/* Reentrancy is only checked on slow path. */
 	int8_t reentrancy_level;
 
-	/* Compute the amount of memory the user wants. */
+	/* Compute the amount of memory the user wants.
+     * 计算用户想用的内存的大小
+	 */
 	if (unlikely(compute_size_with_overflow(sopts->may_overflow, dopts, &size))) {
 		goto label_oom;
 	}
@@ -2280,7 +2282,7 @@ imalloc(static_opts_t *sopts, dynamic_opts_t *dopts) {
 	if (likely(tsd_fast(tsd))) {
 		/* Fast and common path. */
 		tsd_assert_fast(tsd);
-		sopts->slow = false;
+		sopts->slow = false; /* 使用快路径来进行内存分配 */
 		return imalloc_body(sopts, dopts, tsd);
 	} else {
 		if (!tsd_get_allocates() && !imalloc_init_check(sopts, dopts)) {
@@ -2293,7 +2295,7 @@ imalloc(static_opts_t *sopts, dynamic_opts_t *dopts) {
 }
 
 /* 通过慢路径来分配内存
- * @param size 要分配的内存的带下
+ * @param size 要分配的内存的大小
  */
 JEMALLOC_NOINLINE
 void *

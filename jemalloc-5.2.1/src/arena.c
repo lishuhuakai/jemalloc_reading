@@ -311,7 +311,7 @@ arena_slab_reg_alloc_batch(extent_t *slab, const bin_info_t *bin_info,
 	unsigned group = 0;
 	bitmap_t g = slab_data->bitmap[group];
 	unsigned i = 0;
-	while (i < cnt) {
+	while (i < cnt) { /* 一共要分配cnt块内存出来 */
 		while (g == 0) {
 			g = slab_data->bitmap[++group];
 		}
@@ -326,7 +326,7 @@ arena_slab_reg_alloc_batch(extent_t *slab, const bin_info_t *bin_info,
 		 * hot loop below.
 		 */
 		uintptr_t base = (uintptr_t)extent_addr_get(slab);
-		uintptr_t regsize = (uintptr_t)bin_info->reg_size;
+		uintptr_t regsize = (uintptr_t)bin_info->reg_size; /* 块大小 */
 		while (pop--) {
 			size_t bit = cfs_lu(&g);
 			size_t regind = shift + bit;
@@ -1371,7 +1371,7 @@ arena_bin_nonfull_slab_get(tsdn_t *tsdn, arena_t *arena, bin_t *bin,
 }
 
 /* Re-fill bin->slabcur, then call arena_slab_reg_alloc(). */
-/*
+/* 重新填充bin->slabcur
  * @return 分配的内存的首地址
  */
 static void *
@@ -1452,7 +1452,7 @@ arena_bin_choose_lock(tsdn_t *tsdn, arena_t *arena, szind_t binind,
 }
 
 /* 小内存分配
- *
+ * @param binind 内存级别
  */
 void
 arena_tcache_fill_small(tsdn_t *tsdn, arena_t *arena, tcache_t *tcache,

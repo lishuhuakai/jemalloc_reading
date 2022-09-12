@@ -1,0 +1,375 @@
+# 1. 结构体的定义
+
+## 1.1 tcache
+
+`tcache`在`jemalloc`中扮演了很重要的角色,它充当了一个缓存层,实际分配内存时,可能会向操作系统申请了过多的内存,没有关系,先放入`tcache`之中,上层应用程序释放了内存,那么也暂时不要还给操作系统,先缓存在`tcache`之中,应用进程下一次要使用的时候,可以快速从`tcache`中获取到对应的内存,`tcache`的存在有以下优点:
+
+1. 减少了系统调用的次数,不用每次内存申请,回收都去调用系统调用;
+2. 加快了内存分配和回收的速度;
+
+这些优点的代价是,增加了内存占用.
+
+```c
+/* thread cache,每个线程独有的缓存,大多数内存申请都可以在tcache中直接得到,从而避免加锁
+ */
+struct tcache_s {
+	/*
+	 * To minimize our cache-footprint, we put the frequently accessed data
+	 * together at the start of this struct.
+	 */
+
+	/* Cleared after arena_prof_accum(). */
+	uint64_t	prof_accumbytes;
+	/* Drives incremental GC. */
+	ticker_t	gc_ticker; /* 垃圾收集tick */
+
+	cache_bin_t	bins_small[SC_NBINS]; /* 小内存的cache_bin,注意这里的每一个cache_bin中缓存的内存块都是不同级别的 */
+
+	/*
+	 * This data is less hot; we can be a little less careful with our
+	 * footprint here.
+	 */
+	/* Lets us track all the tcaches in an arena. */
+	ql_elm(tcache_t) link; /* 将arena上所有的tcache通过指针连接起来 */
+
+	/* Logically scoped to tsd, but put here for cache layout reasons. */
+	ql_elm(tsd_t) tsd_link;
+	bool in_hook;
+
+	/*
+	 * The descriptor lets the arena find our cache bins without seeing the
+	 * tcache definition.  This enables arenas to aggregate stats across
+	 * tcaches without having a tcache dependency.
+	 */
+	cache_bin_array_descriptor_t cache_bin_array_descriptor;
+
+	arena_t		*arena; /* tcache关联的arena */
+	/* Next bin to GC. */
+	szind_t		next_gc_bin;
+	/* For small bins, fill (ncached_max >> lg_fill_div). */
+	uint8_t		lg_fill_div[SC_NBINS];
+	/*
+	 * We put the cache bins for large size classes at the end of the
+	 * struct, since some of them might not get used.  This might end up
+	 * letting us avoid touching an extra page if we don't have to.
+	 */
+	cache_bin_t	bins_large[SC_NSIZES-SC_NBINS]; /* 大的cache_bin,每一个级别的内存块都有一个cache_bin */
+};
+
+/* Linkage for list of available (previously used) explicit tcache IDs. */
+struct tcaches_s {
+	union {
+		tcache_t	*tcache;
+		tcaches_t	*next;
+	};
+};
+```
+
+## 1.2 cache_bin
+
+`tcache`有两个非常重要的成员,一个是`bins_small`, 另外一个是`bins_large`,它们的类型都是`cache_bin`,这个结构体主要用来缓存内存.
+
+需要注意的是,`cache_bin`中缓存的内存块的大小都是一样的.
+
+```c
+/*
+ * Read-only information associated with each element of tcache_t's tbins array
+ * is stored separately, mainly to reduce memory usage.
+ */
+typedef struct cache_bin_info_s cache_bin_info_t;
+struct cache_bin_info_s {
+	/* Upper limit on ncached. */
+	cache_bin_sz_t ncached_max;  /* 上限 */
+};
+
+typedef struct cache_bin_s cache_bin_t;
+struct cache_bin_s {
+	/* Min # cached since last GC. */
+	cache_bin_sz_t low_water; /* 低水位 */
+	/* # of cached objects. */
+	cache_bin_sz_t ncached; /* 已经缓存的内存块的数目 */
+	/*
+	 * ncached and stats are both modified frequently.  Let's keep them
+	 * close so that they have a higher chance of being on the same
+	 * cacheline, thus less write-backs.
+	 */
+	cache_bin_stats_t tstats; /* 统计信息 */
+	/*
+	 * Stack of available objects.
+	 *
+	 * To make use of adjacent cacheline prefetch, the items in the avail
+	 * stack goes to higher address for newer allocations.  avail points
+	 * just above the available space, which means that
+	 * avail[-ncached, ... -1] are available items and the lowest item will
+	 * be allocated first.
+	 */
+	void **avail; /* 可用的内存 */
+};
+```
+
+# 2. tcache的相关函数
+
+## 2.1 建立tcache和arena的联系
+
+`tcache`一定会依附在一个`arena`之上,`tcache_arena_associate`正是用来建立这种联系:
+
+```c
+/* cache_bin_array_descriptor的初始化 */
+static inline void
+cache_bin_array_descriptor_init(cache_bin_array_descriptor_t *descriptor,
+    cache_bin_t *bins_small, cache_bin_t *bins_large) {
+	ql_elm_new(descriptor, link);
+	descriptor->bins_small = bins_small;
+	descriptor->bins_large = bins_large;
+}
+
+/* 建立tcache与arena的联系
+ *
+ */
+void
+tcache_arena_associate(tsdn_t *tsdn, tcache_t *tcache, arena_t *arena) {
+	tcache->arena = arena;
+
+	if (config_stats) {
+		/* Link into list of extant tcaches. */
+		malloc_mutex_lock(tsdn, &arena->tcache_ql_mtx);
+		ql_elm_new(tcache, link);
+        /* 将tcache插入arena->tcache_ql链表之中 */
+		ql_tail_insert(&arena->tcache_ql, tcache, link);
+		cache_bin_array_descriptor_init(
+		    &tcache->cache_bin_array_descriptor, tcache->bins_small,
+		    tcache->bins_large);
+        /* 将tcache放入arena->cache_bin_array_descriptor_ql之中 */
+		ql_tail_insert(&arena->cache_bin_array_descriptor_ql,
+		    &tcache->cache_bin_array_descriptor, link);
+		malloc_mutex_unlock(tsdn, &arena->tcache_ql_mtx);
+	}
+}
+```
+
+## 2.2 断开tcache和arena的联系
+
+`tcache_arena_dissociate`用于断开`tcache`和`arena`的联系:
+
+```c
+/* 断开tcache和tsd的联系
+ * @param tsdn
+ * @param tcache 线程内存缓存
+ */
+static void
+tcache_arena_dissociate(tsdn_t *tsdn, tcache_t *tcache) {
+	arena_t *arena = tcache->arena;
+	assert(arena != NULL);
+	if (config_stats) {
+		/* Unlink from list of extant tcaches. */
+		malloc_mutex_lock(tsdn, &arena->tcache_ql_mtx);
+		if (config_debug) {
+			bool in_ql = false;
+			tcache_t *iter;
+			ql_foreach(iter, &arena->tcache_ql, link) {
+				if (iter == tcache) {
+					in_ql = true;
+					break;
+				}
+			}
+			assert(in_ql);
+		}
+		ql_remove(&arena->tcache_ql, tcache, link);
+		ql_remove(&arena->cache_bin_array_descriptor_ql,
+		    &tcache->cache_bin_array_descriptor, link);
+		tcache_stats_merge(tsdn, tcache, arena);
+		malloc_mutex_unlock(tsdn, &arena->tcache_ql_mtx);
+	}
+	tcache->arena = NULL;
+}
+```
+
+## 2.3 tcache模块的初始化
+
+```c
+/*
+ * Absolute minimum number of cache slots for each small bin.
+ */
+#define TCACHE_NSLOTS_SMALL_MIN		20
+
+/*
+ * Absolute maximum number of cache slots for each small bin in the thread
+ * cache.  This is an additional constraint beyond that imposed as: twice the
+ * number of regions per slab for this size class.
+ *
+ * This constant must be an even number.
+ */
+#define TCACHE_NSLOTS_SMALL_MAX		200
+
+/*
+ * Read-only information associated with each element of tcache_t's tbins array
+ * is stored separately, mainly to reduce memory usage.
+ */
+typedef struct cache_bin_info_s cache_bin_info_t;
+struct cache_bin_info_s {
+	/* Upper limit on ncached. */
+	cache_bin_sz_t ncached_max;  /* 上限 */
+};
+
+bin_info_t bin_infos[SC_NBINS]; /* 全局唯一的bin_infos数组 */
+cache_bin_info_t	*tcache_bin_info;
+/* tcache模块的初始化 */
+bool
+tcache_boot(tsdn_t *tsdn) {
+	/* If necessary, clamp opt_lg_tcache_max. */
+	if (opt_lg_tcache_max < 0 || (ZU(1) << opt_lg_tcache_max) < SC_SMALL_MAXCLASS) {
+		tcache_maxclass = SC_SMALL_MAXCLASS;
+	} else {
+		tcache_maxclass = (ZU(1) << opt_lg_tcache_max);
+	}
+
+	if (malloc_mutex_init(&tcaches_mtx, "tcaches", WITNESS_RANK_TCACHES,
+	    malloc_mutex_rank_exclusive)) {
+		return true;
+	}
+
+	nhbins = sz_size2index(tcache_maxclass) + 1; /* 每一个级别分配一个空间 */
+
+	/* Initialize tcache_bin_info. */
+    /* 通过base分配器来分配数组,用于描述tcache的bin */
+	tcache_bin_info = (cache_bin_info_t *)base_alloc(tsdn, b0get(), nhbins * sizeof(cache_bin_info_t), CACHELINE);
+	if (tcache_bin_info == NULL) {
+		return true;
+	}
+	stack_nelms = 0;
+	unsigned i;
+    /* 计算每个cache_bin缓存的上限 */
+	for (i = 0; i < SC_NBINS; i++) {
+		if ((bin_infos[i].nregs << 1) <= TCACHE_NSLOTS_SMALL_MIN) {
+			tcache_bin_info[i].ncached_max = TCACHE_NSLOTS_SMALL_MIN; /* 缓存20个? */
+		} else if ((bin_infos[i].nregs << 1) <= TCACHE_NSLOTS_SMALL_MAX) {
+			tcache_bin_info[i].ncached_max = (bin_infos[i].nregs << 1);
+		} else {
+			tcache_bin_info[i].ncached_max = TCACHE_NSLOTS_SMALL_MAX; /* 200 */
+		}
+		stack_nelms += tcache_bin_info[i].ncached_max;
+	}
+	for (; i < nhbins; i++) {
+		tcache_bin_info[i].ncached_max = TCACHE_NSLOTS_LARGE; /* 其余最多也是20个 */
+		stack_nelms += tcache_bin_info[i].ncached_max;
+	}
+	return false;
+}
+```
+
+## 2.4 创建tcache
+
+`tcaches_create`用于创建一个新的`tcache`,但是这个函数并不返回`tcache`,而是直接在函数内部,将分配的`tcache`和对应的`arena`联系起来.
+
+```c
+/* Created manual tcache for tcache.create mallctl. */
+tcache_t *
+tcache_create_explicit(tsd_t *tsd) {
+	tcache_t *tcache;
+	size_t size, stack_offset;
+
+	size = sizeof(tcache_t);
+	/* Naturally align the pointer stacks. */
+	size = PTR_CEILING(size);
+	stack_offset = size;
+	size += stack_nelms * sizeof(void *);
+	/* Avoid false cacheline sharing. */
+	size = sz_sa2u(size, CACHELINE);
+
+	tcache = ipallocztm(tsd_tsdn(tsd), size, CACHELINE, true, NULL, true, arena_get(TSDN_NULL, 0, true));
+	if (tcache == NULL) {
+		return NULL;
+	}
+	/* 初始化tcache */
+	tcache_init(tsd, tcache, (void *)((uintptr_t)tcache + (uintptr_t)stack_offset));
+    /* tcache只能属于某一个arena,所以要将它们联系起来 */
+	tcache_arena_associate(tsd_tsdn(tsd), tcache, arena_ichoose(tsd, NULL));
+	return tcache;
+}
+
+/* 创建tcache */
+bool
+tcaches_create(tsd_t *tsd, unsigned *r_ind) {
+	bool err;
+
+	if (tcaches_create_prep(tsd)) {
+		err = true;
+		goto label_return;
+	}
+
+	tcache_t *tcache = tcache_create_explicit(tsd); /* 创建一个tcache */
+	if (tcache == NULL) {
+		err = true;
+		goto label_return;
+	}
+
+	tcaches_t *elm;
+	malloc_mutex_lock(tsd_tsdn(tsd), &tcaches_mtx);
+	if (tcaches_avail != NULL) {
+		elm = tcaches_avail;
+		tcaches_avail = tcaches_avail->next;
+		elm->tcache = tcache; /* 插入首部 */
+		*r_ind = (unsigned)(elm - tcaches);
+	} else {
+		elm = &tcaches[tcaches_past];
+		elm->tcache = tcache;
+		*r_ind = tcaches_past;
+		tcaches_past++;
+	}
+	malloc_mutex_unlock(tsd_tsdn(tsd), &tcaches_mtx);
+
+	err = false;
+label_return:
+	return err;
+}
+```
+
+## 2.5 tcache的初始化
+
+```c
+cache_bin_t *
+tcache_small_bin_get(tcache_t *tcache, szind_t binind) {
+	return &tcache->bins_small[binind];
+}
+
+cache_bin_t *
+tcache_large_bin_get(tcache_t *tcache, szind_t binind) {
+	return &tcache->bins_large[binind - SC_NBINS];
+}
+
+/* Initialize auto tcache (embedded in TSD). */
+static void
+tcache_init(tsd_t *tsd, tcache_t *tcache, void *avail_stack) {
+	memset(&tcache->link, 0, sizeof(ql_elm(tcache_t)));
+	tcache->prof_accumbytes = 0;
+	tcache->next_gc_bin = 0;
+	tcache->arena = NULL;
+
+	ticker_init(&tcache->gc_ticker, TCACHE_GC_INCR);
+
+	size_t stack_offset = 0;
+	assert((TCACHE_NSLOTS_SMALL_MAX & 1U) == 0);
+	memset(tcache->bins_small, 0, sizeof(cache_bin_t) * SC_NBINS);
+	memset(tcache->bins_large, 0, sizeof(cache_bin_t) * (nhbins - SC_NBINS));
+	unsigned i = 0;
+	for (; i < SC_NBINS; i++) {
+		tcache->lg_fill_div[i] = 1;
+        /* stack_offset每次前移一个位置 */
+		stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *);
+		/*
+		 * avail points past the available space.  Allocations will
+		 * access the slots toward higher addresses (for the benefit of
+		 * prefetch).
+		 */
+		tcache_small_bin_get(tcache, i)->avail =
+		    (void **)((uintptr_t)avail_stack + (uintptr_t)stack_offset);
+	}
+	for (; i < nhbins; i++) {
+         /* stack_offset每次前移一个位置 */
+		stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *);
+		tcache_large_bin_get(tcache, i)->avail =
+		    (void **)((uintptr_t)avail_stack + (uintptr_t)stack_offset);
+	}
+}
+```
+

@@ -449,6 +449,7 @@ tcache_init(tsd_t *tsd, tcache_t *tcache, void *avail_stack) {
 	unsigned i = 0;
 	for (; i < SC_NBINS; i++) {
 		tcache->lg_fill_div[i] = 1;
+        /* stack_offset每次前移一个位置 */
 		stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *);
 		/*
 		 * avail points past the available space.  Allocations will
@@ -459,6 +460,7 @@ tcache_init(tsd_t *tsd, tcache_t *tcache, void *avail_stack) {
 		    (void **)((uintptr_t)avail_stack + (uintptr_t)stack_offset);
 	}
 	for (; i < nhbins; i++) {
+         /* stack_offset每次前移一个位置 */
 		stack_offset += tcache_bin_info[i].ncached_max * sizeof(void *);
 		tcache_large_bin_get(tcache, i)->avail =
 		    (void **)((uintptr_t)avail_stack + (uintptr_t)stack_offset);
@@ -528,8 +530,8 @@ tcache_create_explicit(tsd_t *tsd) {
 		return NULL;
 	}
 
-	tcache_init(tsd, tcache,
-	    (void *)((uintptr_t)tcache + (uintptr_t)stack_offset));
+	tcache_init(tsd, tcache, (void *)((uintptr_t)tcache + (uintptr_t)stack_offset));
+    /* tcache只能属于某一个arena,所以要将它们联系起来 */
 	tcache_arena_associate(tsd_tsdn(tsd), tcache, arena_ichoose(tsd, NULL));
 
 	return tcache;
@@ -685,7 +687,7 @@ tcaches_create(tsd_t *tsd, unsigned *r_ind) {
 		goto label_return;
 	}
 
-	tcache_t *tcache = tcache_create_explicit(tsd);
+	tcache_t *tcache = tcache_create_explicit(tsd); /* 创建一个tcache */
 	if (tcache == NULL) {
 		err = true;
 		goto label_return;
@@ -696,7 +698,7 @@ tcaches_create(tsd_t *tsd, unsigned *r_ind) {
 	if (tcaches_avail != NULL) {
 		elm = tcaches_avail;
 		tcaches_avail = tcaches_avail->next;
-		elm->tcache = tcache;
+		elm->tcache = tcache; /* 插入首部 */
 		*r_ind = (unsigned)(elm - tcaches);
 	} else {
 		elm = &tcaches[tcaches_past];
